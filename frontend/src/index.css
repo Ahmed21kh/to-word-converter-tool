@@ -1,0 +1,244 @@
+/* Layer order: Tailwind preflight < Ant Design < Tailwind utilities (utilities can always override antd). */
+@layer theme, base, antd, components, utilities;
+@import 'tailwindcss';
+@import '@fontsource/cairo/arabic-400.css';
+@import '@fontsource/cairo/arabic-600.css';
+@import '@fontsource/cairo/arabic-800.css';
+@import '@fontsource/cairo/latin-400.css';
+@import '@fontsource/cairo/latin-600.css';
+@import '@fontsource/cairo/latin-800.css';
+
+/* Theme: "light" and "dark" are explicit; "system" simply picks one of them from the device setting.
+   Either way the result is the `dark` class on <html>, which Tailwind's `dark:` variant follows. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+  Eye-comfort palette. Instead of stark white / pure black, the whole UI uses soft, slightly warm
+  neutrals (paper-like in light mode, deep green-grey in dark mode) and a muted teal accent.
+  Overriding the Tailwind tokens here re-colours every component consistently.
+*/
+@theme {
+  --font-sans: 'Cairo', ui-sans-serif, system-ui, 'Segoe UI', Tahoma, Arial, sans-serif;
+
+  --color-white: #fffefb;
+  --color-slate-50: #f5f6f3;
+  --color-slate-100: #eceee9;
+  --color-slate-200: #dde1da;
+  --color-slate-300: #c3c9bf;
+  --color-slate-400: #97a093;
+  --color-slate-500: #6f796d;
+  --color-slate-600: #535e55;
+  --color-slate-700: #3e4841;
+  --color-slate-800: #28312d;
+  --color-slate-900: #1a2220;
+  --color-slate-950: #0f1514;
+
+  --color-brand-50: #eef7f5;
+  --color-brand-100: #d6ece7;
+  --color-brand-200: #afddd4;
+  --color-brand-300: #85c9bd;
+  --color-brand-400: #5db3a5;
+  --color-brand-500: #3f9b8d;
+  --color-brand-600: #2f8478;
+  --color-brand-700: #266d63;
+  --color-brand-800: #205750;
+  --color-brand-900: #1a4641;
+  --color-gold-400: #d4a64e;
+  --color-gold-500: #b8893a;
+}
+
+@layer base {
+  :root { color-scheme: light; }
+  .dark { color-scheme: dark; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--font-sans);
+    background: #f4f5f1;
+    color: #1f2925;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    transition: background-color 0.25s ease, color 0.25s ease;
+  }
+  .dark body { background: #0f1514; color: #dbe2da; }
+  ::selection { background: rgba(63, 155, 141, 0.28); }
+  :focus-visible { outline: 2px solid var(--color-brand-500); outline-offset: 2px; border-radius: 6px; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, ::before, ::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
+}
+
+/* Hero: soft colour glows + a faint eight-point-star lattice (pure CSS, no image request). */
+.hero-bg {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    radial-gradient(900px 420px at 15% -10%, rgba(63, 155, 141, 0.20), transparent 62%),
+    radial-gradient(800px 380px at 90% 0%, rgba(184, 137, 58, 0.14), transparent 60%),
+    linear-gradient(180deg, #f1f4ef 0%, #f4f5f1 100%);
+}
+.dark .hero-bg {
+  background:
+    radial-gradient(900px 420px at 15% -10%, rgba(63, 155, 141, 0.20), transparent 62%),
+    radial-gradient(800px 380px at 90% 0%, rgba(212, 166, 78, 0.10), transparent 60%),
+    linear-gradient(180deg, #121a19 0%, #0f1514 100%);
+}
+.hero-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  opacity: 0.9;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'%3E%3Cpath d='M40 6l7 14 15-5-5 15 14 7-14 7 5 15-15-5-7 14-7-14-15 5 5-15-14-7 14-7-5-15 15 5z' fill='none' stroke='%232f8478' stroke-opacity='.10' stroke-width='1'/%3E%3C/svg%3E");
+  -webkit-mask-image: linear-gradient(180deg, #000 30%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 30%, transparent 100%);
+}
+.dark .hero-bg::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'%3E%3Cpath d='M40 6l7 14 15-5-5 15 14 7-14 7 5 15-15-5-7 14-7-14-15 5 5-15-14-7 14-7-5-15 15 5z' fill='none' stroke='%235db3a5' stroke-opacity='.10' stroke-width='1'/%3E%3C/svg%3E");
+}
+
+/* Cards: soft elevation, gentle lift on hover */
+.surface {
+  background: var(--color-white);
+  border: 1px solid var(--color-slate-200);
+  border-radius: 1.25rem;
+  box-shadow: 0 1px 2px rgba(26, 34, 32, 0.04), 0 8px 24px -12px rgba(26, 34, 32, 0.10);
+}
+.dark .surface {
+  background: var(--color-slate-900);
+  border-color: var(--color-slate-800);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px -14px rgba(0, 0, 0, 0.55);
+}
+.lift { transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease; }
+.lift:hover { transform: translateY(-3px); border-color: var(--color-brand-300); }
+.dark .lift:hover { border-color: var(--color-brand-700); }
+
+/* Entrance animation (disabled automatically for reduced-motion users) */
+@keyframes rise-in { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+.rise-in { animation: rise-in 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+/* Drop zone */
+.drop-zone .ant-upload.ant-upload-drag { transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease; }
+.drop-zone .ant-upload.ant-upload-drag:hover,
+.drop-zone .ant-upload.ant-upload-drag.ant-upload-drag-hover {
+  border-color: var(--color-brand-500) !important;
+  box-shadow: 0 0 0 4px rgba(63, 155, 141, 0.14);
+}
+
+/* Arabic text inside LTR UI (and vice versa) must keep its own direction. */
+.bidi-isolate { unicode-bidi: isolate; }
+.quran-text { font-family: 'Traditional Arabic', 'Amiri', 'Scheherazade New', 'Cairo', serif; line-height: 2.1; font-size: 1.15rem; }
+
+/* ------------------------------------------------------------------------------------------
+   Motion. Everything here is switched off for users who prefer reduced motion (see @layer base),
+   and nothing hides content when JavaScript is unavailable (reveal state is added by JS only).
+   ------------------------------------------------------------------------------------------ */
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes float-a { 0%, 100% { transform: translate3d(0, 0, 0) scale(1); } 50% { transform: translate3d(24px, 18px, 0) scale(1.08); } }
+@keyframes float-b { 0%, 100% { transform: translate3d(0, 0, 0) scale(1); } 50% { transform: translate3d(-28px, 14px, 0) scale(1.1); } }
+@keyframes pop-in { 0% { opacity: 0; transform: scale(0.4); } 70% { transform: scale(1.18); } 100% { opacity: 1; transform: scale(1); } }
+@keyframes item-in { from { opacity: 0; transform: translateY(10px) scale(0.985); } to { opacity: 1; transform: none; } }
+@keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+@keyframes sheen { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+.fade-in { animation: fade-in 0.45s ease both; }
+.page-fade { animation: fade-in 0.5s ease both; }
+.pop-in { display: inline-block; animation: pop-in 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.4) both; }
+.item-in { animation: item-in 0.38s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.item-out { opacity: 0; transform: translateX(-12px) scale(0.98); transition: opacity 0.25s ease, transform 0.25s ease; pointer-events: none; }
+[dir='rtl'] .item-out { transform: translateX(12px) scale(0.98); }
+
+/* staggered entrance for hero content */
+.hero-stagger > * { animation: rise-in 0.65s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.hero-stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.hero-stagger > *:nth-child(2) { animation-delay: 0.1s; }
+.hero-stagger > *:nth-child(3) { animation-delay: 0.18s; }
+.hero-stagger > *:nth-child(4) { animation-delay: 0.26s; }
+
+/* slow floating glows behind the hero */
+.blob { position: absolute; z-index: -1; border-radius: 9999px; filter: blur(60px); opacity: 0.55; pointer-events: none; }
+.blob-a { width: 340px; height: 340px; top: -90px; inset-inline-start: 6%; background: rgba(63, 155, 141, 0.45); animation: float-a 14s ease-in-out infinite; }
+.blob-b { width: 300px; height: 300px; top: 30px; inset-inline-end: 8%; background: rgba(212, 166, 78, 0.35); animation: float-b 17s ease-in-out infinite; }
+.dark .blob { opacity: 0.32; }
+
+/* scroll reveal (class is added by <Reveal> only after mount, so SSR/no-JS content stays visible) */
+.reveal-hidden { opacity: 0; transform: translateY(26px); }
+.reveal-shown { opacity: 1; transform: none; transition: opacity 0.65s ease var(--d, 0ms), transform 0.65s cubic-bezier(0.2, 0.7, 0.2, 1) var(--d, 0ms); }
+
+/* upload icon: gentle bob, livelier while a file is dragged over */
+.drop-zone .bob { display: inline-block; animation: bob 3.2s ease-in-out infinite; }
+.drop-zone .ant-upload-drag-hover .bob { animation-duration: 0.9s; }
+
+/* soft colour transition when switching theme */
+.surface, header, footer { transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease; }
+
+/* buttons: tiny lift on hover / press */
+@layer components {
+  .ant-btn-primary:not(:disabled):not(.ant-btn-disabled) { transition: transform 0.15s ease, box-shadow 0.2s ease, background-color 0.2s ease; }
+  .ant-btn-primary:not(:disabled):not(.ant-btn-disabled):hover { transform: translateY(-1px); box-shadow: 0 6px 16px -6px rgba(47, 132, 120, 0.6); }
+  .ant-btn-primary:not(:disabled):not(.ant-btn-disabled):active { transform: translateY(0) scale(0.98); }
+}
+
+/* progress bars get a moving sheen while active */
+.ant-progress-bg::after { background-size: 200% 100%; animation: sheen 2.2s linear infinite; }
+
+/* ------------------------------------------------------------------------------------------
+   Glass navigation bar + gradient side bar / side panels
+   ------------------------------------------------------------------------------------------ */
+.glass-nav {
+  background: color-mix(in srgb, var(--color-white) 68%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(1.5);
+  backdrop-filter: blur(18px) saturate(1.5);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-slate-300) 55%, transparent);
+  transition: background-color 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
+}
+.dark .glass-nav {
+  background: color-mix(in srgb, var(--color-slate-950) 62%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--color-slate-700) 55%, transparent);
+}
+.glass-nav.is-scrolled { box-shadow: 0 10px 30px -18px rgba(26, 34, 32, 0.45); background: color-mix(in srgb, var(--color-white) 82%, transparent); }
+.dark .glass-nav.is-scrolled { background: color-mix(in srgb, var(--color-slate-950) 78%, transparent); box-shadow: 0 10px 30px -16px rgba(0, 0, 0, 0.8); }
+
+/* Blurred, tinted backdrop behind every slide-in panel */
+.glass-drawer .ant-drawer-mask,
+.side-menu .ant-drawer-mask {
+  -webkit-backdrop-filter: blur(7px) saturate(1.2);
+  backdrop-filter: blur(7px) saturate(1.2);
+  background: rgba(15, 21, 20, 0.38);
+}
+
+/* Side bar (navigation): deep teal linear gradient, readable in both themes */
+.side-menu .ant-drawer-section {
+  background: linear-gradient(165deg, #1a4641 0%, #266d63 52%, #2f8478 100%);
+  color: #f1f7f5;
+}
+.dark .side-menu .ant-drawer-section { background: linear-gradient(165deg, #0f1514 0%, #17302d 50%, #205750 100%); }
+.side-menu .ant-drawer-header { border-bottom: 1px solid rgba(255, 255, 255, 0.14); background: transparent; }
+.side-menu .ant-drawer-title, .side-menu .ant-drawer-close { color: #f1f7f5; }
+.side-link {
+  display: flex; align-items: center; gap: 0.75rem; padding: 0.8rem 1rem; border-radius: 0.9rem;
+  color: #e6f1ee; text-decoration: none; font-weight: 700; transition: background-color 0.2s ease, transform 0.2s ease;
+}
+.side-link:hover { background: rgba(255, 255, 255, 0.12); transform: translateX(-3px); }
+[dir='ltr'] .side-link:hover { transform: translateX(3px); }
+.side-link[aria-current='page'] { background: rgba(255, 255, 255, 0.2); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22); }
+.side-link-enter { animation: rise-in 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+/* Side panels (preview / report): soft gradient surface instead of flat colour */
+.glass-drawer .ant-drawer-section { background: linear-gradient(180deg, #f6f8f4 0%, #eef2ec 100%); }
+.dark .glass-drawer .ant-drawer-section { background: linear-gradient(180deg, #172120 0%, #0f1514 100%); }
+.glass-drawer .ant-drawer-header { background: color-mix(in srgb, var(--color-white) 70%, transparent); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+.dark .glass-drawer .ant-drawer-header { background: color-mix(in srgb, var(--color-slate-900) 70%, transparent); }
+
+/* Drop zone look (antd puts the visible box on .ant-upload-drag, not on the outer wrapper) */
+.drop-zone .ant-upload.ant-upload-drag {
+  border: 2px dashed var(--color-brand-400);
+  border-radius: 1.25rem;
+  background: color-mix(in srgb, var(--color-brand-50) 75%, transparent);
+  padding: 0.5rem 0;
+}
+.dark .drop-zone .ant-upload.ant-upload-drag {
+  border-color: var(--color-brand-700);
+  background: color-mix(in srgb, var(--color-slate-800) 55%, transparent);
+}

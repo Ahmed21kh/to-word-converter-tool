@@ -1,0 +1,40 @@
+{
+  "name": "pdf-to-word-backend",
+  "version": "1.0.0",
+  "description": "PDF/Image to Word converter API (Arabic-first)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "node --test test/*.test.js",
+    "fixtures": "node scripts/make-fixtures.mjs",
+    "postinstall": "node scripts/prepare-tessdata.mjs",
+    "dev:watch-node": "node --watch src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.13",
+    "@tesseract.js-data/ara": "^1.0.0",
+    "@tesseract.js-data/eng": "^1.0.0",
+    "compression": "^1.8.2",
+    "cors": "^2.8.6",
+    "docx": "^9.14.0",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
+    "helmet": "^8.3.0",
+    "multer": "^2.5.0",
+    "pdfjs-dist": "^6.4.299",
+    "pino": "^10.4.0",
+    "sharp": "^0.35.5",
+    "tesseract.js": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}

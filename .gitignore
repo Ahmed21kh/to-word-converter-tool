@@ -1,0 +1,10 @@
+node_modules/
+dist/
+dist-server/
+backend/storage/
+backend/test/out/
+backend/test/fixtures/arabic-650.*
+backend/test/fixtures/scan-p*.jpg
+*.log
+.env
+.DS_Store
