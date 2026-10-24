@@ -11,6 +11,8 @@ import { convertWithLibreOffice, libreOfficeAvailable } from './libreoffice.js';
 import { convertPdf, normalizeOptions } from '../pipeline/convert-pdf.js';
 import { convertImage } from '../pipeline/convert-image.js';
 import { convertText } from '../pipeline/convert-text.js';
+import { visionStatus } from '../pipeline/vision-ocr.js';
+import { ensureLlamaServer } from './llama-server.js';
 
 const PHASE_WEIGHT = { queued: 0, analyzing: 2, converting: 90, verifying: 94, building: 97, finalizing: 99, done: 100 };
 
@@ -49,6 +51,12 @@ export class JobManager extends EventEmitter {
       throw err;
     }
     const opts = normalizeOptions(options);
+    if (opts.engine === 'ai' && !visionStatus().available) {
+      await rm(tmpFile, { force: true });
+      const err = new Error('AI reading is not configured on this server (set VISION_PROVIDER). Use the standard engine.');
+      err.status = 400;
+      throw err;
+    }
     if (opts.format === 'doc' && !libreOfficeAvailable()) {
       await rm(tmpFile, { force: true });
       const err = new Error('The legacy .doc format needs LibreOffice on the server (not installed). Use .docx instead.');
@@ -157,6 +165,7 @@ export class JobManager extends EventEmitter {
     };
     try {
       let report;
+      if (job.options.engine === 'ai') await ensureLlamaServer().catch((err) => logger.warn({ err: err.message }, 'AI reader not available, using the standard OCR'));
       if (job.kind === 'pdf') report = await convertPdf(ctx);
       else if (job.kind === 'image') report = await convertImage(ctx);
       else if (job.kind === 'text') report = await convertText(ctx);

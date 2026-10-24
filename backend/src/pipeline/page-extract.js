@@ -15,6 +15,8 @@ const require = createRequire(import.meta.url);
 const pdfjsRoot = path.dirname(require.resolve('pdfjs-dist/package.json'));
 const CMAP_URL = `${pathToFileURL(path.join(pdfjsRoot, 'cmaps')).href}/`;
 const FONT_URL = `${pathToFileURL(path.join(pdfjsRoot, 'standard_fonts')).href}/`;
+// decoders for JPEG2000 (JPX) and JBIG2 scans: without them such pages render blank in Node
+const WASM_URL = `${pathToFileURL(path.join(pdfjsRoot, 'wasm')).href}/`;
 const { OPS } = pdfjs;
 
 export async function openPdf(file) {
@@ -23,6 +25,7 @@ export async function openPdf(file) {
     cMapUrl: CMAP_URL,
     cMapPacked: true,
     standardFontDataUrl: FONT_URL,
+    wasmUrl: WASM_URL,
     useSystemFonts: false,
     isEvalSupported: false,
     fontExtraProperties: true,

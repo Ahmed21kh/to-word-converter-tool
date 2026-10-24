@@ -11,15 +11,15 @@ const ReportDrawer = lazy(() => import('./ReportDrawer.jsx'));
 const PreviewDrawer = lazy(() => import('./PreviewDrawer.jsx'));
 
 const DEFAULT_OPTIONS = {
-  format: 'docx', mode: 'smart', language: 'ar', quran: 'correct',
-  highlightUncertain: true, detectHeadings: true, arabicFont: 'Traditional Arabic',
+  format: 'docx', mode: 'smart', language: 'ar', engine: 'standard', quran: 'correct',
+  highlightUncertain: false, detectHeadings: true, arabicFont: 'Traditional Arabic',
 };
 const FALLBACK_CAPS = {
   accept: ['.pdf', '.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.bmp', '.gif', '.txt', '.md', '.csv'],
   outputs: ['docx'], limits: { maxUploadMb: 500 }, retentionMinutes: 60,
 };
 const FONTS = ['Traditional Arabic', 'Simplified Arabic', 'Sakkal Majalla', 'Arial', 'Tahoma', 'Times New Roman', 'Calibri'];
-const STORAGE_KEY = 'p2w-options-v1';
+const STORAGE_KEY = 'p2w-options-v2'; // bumped: v1 saved highlightUncertain=true for everybody
 
 export default function ConverterCard({ onCapabilities }) {
   const { t } = useI18n();
@@ -44,6 +44,7 @@ export default function ConverterCard({ onCapabilities }) {
         setCaps(c);
         onCapabilities?.(c);
         if (!c.outputs.includes('doc')) setOptions((o) => (o.format === 'doc' ? { ...o, format: 'docx' } : o));
+        if (!c.features?.ai?.available) setOptions((o) => (o.engine === 'ai' ? { ...o, engine: 'standard' } : o));
       })
       .catch(() => {});
   }, [onCapabilities]);
@@ -74,6 +75,7 @@ export default function ConverterCard({ onCapabilities }) {
 
   const hasFinished = items.some((i) => ['done', 'error', 'cancelled'].includes(i.status));
   const docAvailable = caps.outputs.includes('doc');
+  const ai = caps.features?.ai;
 
   const optionPanel = (
     <div className="grid gap-5 pt-1 md:grid-cols-2">
@@ -105,8 +107,24 @@ export default function ConverterCard({ onCapabilities }) {
           value={options.language}
           onChange={(v) => setOpt('language', v)}
           className="w-full"
-          options={[{ value: 'ar', label: t('converter.options.langAr') }, { value: 'en', label: t('converter.options.langEn') }]}
+          options={[{ value: 'ar', label: t('converter.options.langAr') }, { value: 'mixed', label: t('converter.options.langMixed') }, { value: 'en', label: t('converter.options.langEn') }]}
         />
+      </div>
+
+      <div className="md:col-span-2">
+        <div className="mb-2 font-bold">{t('converter.options.engine')}</div>
+        <Radio.Group value={options.engine} onChange={(e) => setOpt('engine', e.target.value)} optionType="button" buttonStyle="solid">
+          <Radio.Button value="standard">{t('converter.options.engineStandard')}</Radio.Button>
+          <Tooltip title={ai?.available ? undefined : t('converter.options.engineAiUnavailable')}>
+            <Radio.Button value="ai" disabled={!ai?.available}>{t('converter.options.engineAi')}</Radio.Button>
+          </Tooltip>
+        </Radio.Group>
+        {options.engine === 'ai' && ai?.available && (
+          <p className="mb-0 mt-2 text-xs leading-6 text-amber-700 dark:text-amber-400">
+            {ai.external ? t('converter.options.engineAiHintExternal') : t('converter.options.engineAiHintLocal')}
+          </p>
+        )}
+        {!ai?.available && <p className="mb-0 mt-2 text-xs text-slate-500">{t('converter.options.engineAiUnavailable')}</p>}
       </div>
 
       <div>
@@ -200,7 +218,7 @@ export default function ConverterCard({ onCapabilities }) {
 
       {preview && (
         <Suspense fallback={null}>
-          <PreviewDrawer jobId={preview.id} name={preview.name} onClose={() => setPreview(null)} />
+          <PreviewDrawer jobId={preview.id} name={preview.name} officeViewer={caps.features?.officeViewer} onClose={() => setPreview(null)} />
         </Suspense>
       )}
       {report && (

@@ -57,6 +57,13 @@ export default function ReportDrawer({ jobId, name, onClose }) {
             </div>
           </section>
 
+          {report.scan?.aiPages > 0 && (
+            <Alert type="success" showIcon title={t('report.method.ai')} description={t('report.aiText', { pages: report.scan.aiPages, inTok: report.scan.aiInputTokens.toLocaleString(), outTok: report.scan.aiOutputTokens.toLocaleString() })} />
+          )}
+          {report.scan?.ocrPages > 0 && (
+            <Alert type="info" showIcon title={t('report.scanTitle')} description={t('report.scanText', { ocr: report.scan.ocrPages, strip: report.scan.diacriticsStripped, pics: report.scan.keptAsPictures })} />
+          )}
+
           <section>
             <h3 className="mb-3 text-lg font-bold">{t('report.quran')}</h3>
             {q.found === 0 && q.items.length === 0 ? (

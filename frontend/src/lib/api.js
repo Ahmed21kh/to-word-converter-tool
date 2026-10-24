@@ -11,7 +11,10 @@ async function json(res) {
 }
 
 export async function getCapabilities() {
-  return json(await fetch(`${BASE}/api/capabilities`));
+  const caps = await json(await fetch(`${BASE}/api/capabilities`));
+  // a restarting server or a wrong URL can answer with something that is not the capabilities document
+  if (!Array.isArray(caps.accept) || !Array.isArray(caps.outputs)) throw new Error('Unexpected capabilities response');
+  return caps;
 }
 
 export async function getReport(id) {

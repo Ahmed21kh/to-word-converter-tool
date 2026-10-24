@@ -60,18 +60,29 @@ if (box) {
 }
 {
   const base = box ? crop(gray, W, H, box) : { gray, width: W, height: H };
-  const variants = [
-    { dotExtent: 0.66, dotAspect: 1.7 },
-    { dotExtent: 0.35, dotAspect: 1.5 },
-    { dotExtent: 0.35, dotAspect: 1.3 },
-    { dotExtent: 0.3, dotAspect: 1.8 },
-    { dotExtent: 0.45, dotAspect: 1.6 },
-  ];
-  for (const v of variants) {
-    const s = stripDiacritics(base.gray, base.width, base.height, v);
-    await run('strip ' + JSON.stringify(v), s.gray, base.width, base.height, 6);
-    if (v.dotAspect === 1.5) await sharp(Buffer.from(s.gray), { raw: { width: base.width, height: base.height, channels: 1 } }).png().toFile(process.env.LAB_OUT || 'lab-stripped.png');
+  const s = stripDiacritics(base.gray, base.width, base.height, { dotExtent: 0.35, dotAspect: 1.3 });
+  const araOnly = await createWorker(['ara'], 1, { langPath: path.resolve('data/tessdata'), gzip: true, cacheMethod: 'none', logger: () => {} });
+  const runWith = async (wk, label, g, w, h, psm) => {
+    await wk.setParameters({ tessedit_pageseg_mode: String(psm), preserve_interword_spaces: '1', user_defined_dpi: '300' });
+    const png = await sharp(Buffer.from(g), { raw: { width: w, height: h, channels: 1 } }).png().toBuffer();
+    const { data } = await wk.recognize(png, {}, { text: true });
+    const sc = score(data.text);
+    console.log(label.padEnd(44) + 'sim=' + (sc.sim * 100).toFixed(1) + '%  conf=' + data.confidence.toFixed(0));
+    return data.text;
+  };
+  await runWith(worker, 'ara+eng, gray', s.gray, base.width, base.height, 6);
+  await runWith(araOnly, 'ara only, gray', s.gray, base.width, base.height, 6);
+  // hard binarisation
+  const bin = Uint8Array.from(s.gray, (v) => (v < 170 ? 0 : 255));
+  await runWith(araOnly, 'ara only, binarised(170)', bin, base.width, base.height, 6);
+  // scales
+  for (const k of [0.7, 1.3]) {
+    const w2 = Math.round(base.width * k), h2 = Math.round(base.height * k);
+    const buf = await sharp(Buffer.from(s.gray), { raw: { width: base.width, height: base.height, channels: 1 } }).resize(w2, h2, { kernel: 'lanczos3' }).raw().toBuffer();
+    await runWith(araOnly, 'ara only, scale ' + k, buf, w2, h2, 6);
   }
+  await runWith(araOnly, 'ara only, auto layout (psm 3)', s.gray, base.width, base.height, 3);
+  await araOnly.terminate();
 }
 await worker.terminate();
 process.exit(0);

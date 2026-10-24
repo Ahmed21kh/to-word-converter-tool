@@ -81,3 +81,21 @@ test('ordinary prose is left alone', () => {
   assert.equal(findings.length, 0);
   assert.equal(textOf(p), before);
 });
+
+test('a verse printed between ( ) by an AI reader is verified and re-bracketed; no stray parenthesis is left', () => {
+  const run = (text) => ({ type: 'p', ocr: true, runs: [{ text }] });
+  const out = (p) => p.runs.map((r) => r.text).join('');
+  // garbled letters and no diacritics, but the words are those of 112:1-4
+  const a = run('قال تعالى: (قل هو الله احد الله الصمد لم يلد ولم يولد ولم يكن له كفوا احد) وبعدها كلام عادي.');
+  const { findings } = guardParagraph(a);
+  assert.ok(findings.length >= 1 && findings[0].ref.includes('الإخلاص'));
+  const text = out(a);
+  assert.ok(text.includes(String.fromCharCode(0xfd3f)) && text.includes(String.fromCharCode(0xfd3e)));
+  assert.ok(!text.includes('(') && !text.includes(')'), 'the parentheses became the ornate brackets');
+  assert.ok(text.endsWith('وبعدها كلام عادي.'));
+
+  // an explanation in parentheses that is not Quran stays untouched
+  const b = run('وقال: (هذا شرح عادي لكلمة من الكلمات التي وردت قبل قليل) انتهى.');
+  guardParagraph(b);
+  assert.equal(out(b), 'وقال: (هذا شرح عادي لكلمة من الكلمات التي وردت قبل قليل) انتهى.');
+});

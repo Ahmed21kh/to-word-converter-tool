@@ -15,8 +15,8 @@ npm run og         # regenerate public/og-image.png and the PWA icons
 | Env var (`.env`) | Meaning |
 | --- | --- |
 | `VITE_SITE_URL` | **Set this to your real domain before building** (used for canonical, hreflang, Open Graph, JSON-LD, sitemap). Default is a placeholder `https://pdf2word.example.com`. |
-| `VITE_API_URL` | Backend address. **`.env.development` sets `http://localhost:4000`** so requests go straight to the backend port (change it if you start the backend on another `PORT`). `.env.production` leaves it empty = same origin. If the API is on another domain, add the site to the backend's `CORS_ORIGINS`. |
-| `VITE_DEV_API` | Only for the (now unused) Vite `/api` proxy fallback. Default `http://localhost:4000`. |
+| `VITE_API_URL` | Backend address. **`.env.development` sets `http://localhost:4100`** so requests go straight to the backend port (change it if you start the backend on another `PORT`). `.env.production` leaves it empty = same origin. If the API is on another domain, add the site to the backend's `CORS_ORIGINS`. |
+| `VITE_DEV_API` | Only for the (now unused) Vite `/api` proxy fallback. Default `http://localhost:4100`. |
 
 ## Features
 
@@ -41,7 +41,7 @@ hashed assets.
 | [`public/`](public/README.md) | static files copied as-is |
 | [`scripts/`](scripts/README.md) | build-time scripts (pre-render, OG image) |
 
-Env files: `.env.development` (API at `http://localhost:4000`) and `.env.production` (same-origin API, `VITE_SITE_URL`).
+Env files: `.env.development` (API at `http://localhost:4100`) and `.env.production` (same-origin API, `VITE_SITE_URL`).
 
 Other files: `index.html` (template; declares the CSS layer order first so Tailwind and Ant Design never fight), `vite.config.js`
 (React + Tailwind plugins, dev proxy, SSR bundling), `package.json`.

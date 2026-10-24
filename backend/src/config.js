@@ -3,10 +3,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// settings from backend/.env (copy .env.example); real environment variables win
+try { process.loadEnvFile(path.join(root, '.env')); } catch { /* no .env file */ }
 const int = (v, d) => (Number.isFinite(Number(v)) && v !== undefined && v !== '' ? Number(v) : d);
 
 export const config = {
-  port: int(process.env.PORT, 4000),
+  port: int(process.env.PORT, 4100),
+  // public https address of this site (e.g. https://pdf.example.com): enables the optional Microsoft Word viewer in the preview
+  publicUrl: (process.env.PUBLIC_URL || '').trim().replace(new RegExp(`${String.fromCharCode(47)}+$`), ''),
   env: process.env.NODE_ENV || 'development',
   // comma separated list of allowed browser origins; empty = same-origin only (use the Vite proxy in dev)
   corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173').split(',').map((s) => s.trim()).filter(Boolean),

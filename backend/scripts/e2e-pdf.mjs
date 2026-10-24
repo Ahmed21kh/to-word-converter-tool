@@ -8,10 +8,11 @@ const workDir = path.join(path.dirname(path.resolve(outFile)), 'work');
 mkdirSync(workDir, { recursive: true });
 const pool = new WorkerPool(Number(process.env.WORKERS || 2));
 let last = '';
+const T0 = Date.now();
 const report = await convertPdf({
   jobId: 'e2e', file: path.resolve(inFile), workDir, outPath: path.resolve(outFile), pool,
-  options: normalizeOptions({ mode }), isCancelled: () => false,
-  onProgress: (p) => { const s = `${p.phase} ${p.done}/${p.total}`; if (s !== last) { last = s; process.stdout.write(s + '\n'); } },
+  options: normalizeOptions({ mode, engine: process.env.ENGINE || 'standard' }), isCancelled: () => false,
+  onProgress: (p) => { const s = `${p.phase} ${p.done}/${p.total}`; if (s !== last) { last = s; process.stdout.write(`${((Date.now() - T0) / 1000).toFixed(1)}s ${s}\n`); } },
 });
 const { pageDetails, ...rest } = report;
 console.log(JSON.stringify(rest, null, 1).slice(0, 3500));

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Button, Drawer, InputNumber, Slider, Spin, Alert } from 'antd';
+import { Button, Drawer, InputNumber, Segmented, Slider, Spin, Alert } from 'antd';
 import { DownloadOutlined, LeftOutlined, RightOutlined, ZoomInOutlined } from '@ant-design/icons';
 import { useI18n } from '../i18n/index.jsx';
 import { downloadUrl, getPreview, previewImageUrl } from '../lib/api.js';
@@ -16,7 +16,7 @@ function Run({ run }) {
   return run.x.split(VERSE).map((part, i) => {
     if (!part) return null;
     if (VERSE.test(part)) {
-      return <span key={i} className="quran-text" style={{ ...base, color: '#0b6b3a', fontWeight: 600 }}>{part}</span>;
+      return <span key={i} className="quran-text" style={{ ...base, fontWeight: 700 }}>{part}</span>;
     }
     if (part.includes(UNMAPPED)) {
       return part.split(UNMAPPED).flatMap((seg, k, arr) => [
@@ -86,8 +86,26 @@ function Paper({ page, jobId, scale }) {
   );
 }
 
-export default function PreviewDrawer({ jobId, name, onClose }) {
+// Microsoft's online viewer opens the .docx from its public address (only possible on a published https site)
+const officeEmbedUrl = (baseUrl, jobId) => `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(`${baseUrl}/api/jobs/${jobId}/document.docx`)}`;
+
+function WordViewer({ src }) {
+  const { t } = useI18n();
+  const [agreed, setAgreed] = useState(false);
+  if (!agreed) {
+    return (
+      <div className="mx-auto max-w-xl py-16 text-center">
+        <Alert type="info" showIcon title={t('preview.wordConsentTitle')} description={t('preview.wordConsent')} />
+        <Button type="primary" className="mt-5" onClick={() => setAgreed(true)}>{t('preview.wordLoad')}</Button>
+      </div>
+    );
+  }
+  return <iframe title={t('preview.viewWord')} src={src} className="h-full min-h-[70vh] w-full rounded border-0 bg-white" referrerPolicy="no-referrer" />;
+}
+
+export default function PreviewDrawer({ jobId, name, officeViewer, onClose }) {
   const { t, dir } = useI18n();
+  const [view, setView] = useState('quick');
   const [total, setTotal] = useState(0);
   const [pageNo, setPageNo] = useState(1);
   const [zoom, setZoom] = useState(100);
@@ -149,27 +167,42 @@ export default function PreviewDrawer({ jobId, name, onClose }) {
       styles={{ body: { padding: 0, display: 'flex', flexDirection: 'column' } }}
     >
       <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 px-4 py-2.5 dark:border-slate-700">
-        <div className="flex items-center gap-1.5">
+        <Segmented
+          value={view}
+          onChange={setView}
+          options={[
+            { value: 'quick', label: t('preview.viewQuick') },
+            { value: 'word', label: t('preview.viewWord'), disabled: !officeViewer?.available },
+          ]}
+        />
+        {view === 'quick' && <div className="flex items-center gap-1.5">
           <Button icon={<Prev />} onClick={() => go(pageNo - 1)} disabled={pageNo <= 1} aria-label={t('preview.prev')} />
           <span className="text-sm">{t('preview.page')}</span>
           <InputNumber min={1} max={total || 1} value={pageNo} onChange={(v) => v && go(Number(v))} controls={false} className="!w-16" aria-label={t('preview.goTo')} />
           <span className="text-sm">{t('preview.of')} {total || '…'}</span>
           <Button icon={<Next />} onClick={() => go(pageNo + 1)} disabled={pageNo >= total} aria-label={t('preview.next')} />
-        </div>
-        <div className="ms-auto flex min-w-[170px] items-center gap-2">
+        </div>}
+        {view === 'quick' && <div className="ms-auto flex min-w-[170px] items-center gap-2">
           <ZoomInOutlined aria-hidden="true" />
           <Slider className="!m-0 flex-1" min={50} max={200} step={10} value={zoom} onChange={setZoom} aria-label={t('preview.zoom')} tooltip={{ formatter: (v) => `${v}%` }} />
-        </div>
+        </div>}
+        {!officeViewer?.available && <span className="text-xs text-slate-500 dark:text-slate-400">{t('preview.wordUnavailable')}</span>}
       </div>
 
+      {view === 'word' && officeViewer?.available ? (
+        <div dir="ltr" className="min-h-0 flex-1 overflow-auto bg-slate-200/70 p-3 dark:bg-slate-950">
+          <WordViewer src={officeEmbedUrl(officeViewer.baseUrl, jobId)} />
+        </div>
+      ) : (
       <div ref={setWrapEl} dir="ltr" className="min-h-0 flex-1 overflow-auto bg-slate-200/70 p-5 dark:bg-slate-950">
         {state === 'loading' && !page && <div className="py-24 text-center"><Spin /> <div className="mt-3 text-slate-500">{t('preview.loading')}</div></div>}
         {state === 'error' && <Alert type="error" showIcon title={t('preview.failed')} />}
         {page && <div key={page.n} className="fade-in"><Paper page={page} jobId={jobId} scale={scale} /></div>}
       </div>
+      )}
 
       <div className="border-t border-slate-200 px-4 py-2 text-xs leading-6 text-slate-500 dark:border-slate-700 dark:text-slate-400">
-        {t('preview.note')}
+        {view === 'word' ? t('preview.wordNote') : t('preview.note')}
       </div>
     </Drawer>
   );

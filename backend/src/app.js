@@ -14,6 +14,7 @@ import { JobManager } from './services/jobs.js';
 import { libreOfficeAvailable } from './services/libreoffice.js';
 import { ACCEPTED_EXTENSIONS } from './services/filetype.js';
 import { readPreview } from './pipeline/preview.js';
+import { visionStatus } from './pipeline/vision-ocr.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const MIME = {
@@ -33,6 +34,18 @@ export async function createApp() {
   app.disable('x-powered-by');
   app.set('trust proxy', config.env === 'production' ? 1 : false);
 
+  // Microsoft's online viewer fetches the file from the public address, so it only works for a real public https site
+  const officeViewerOn = (() => {
+    try {
+      const u = new URL(config.publicUrl);
+      const h = u.hostname;
+      const [a, b] = h.split('.').map(Number);
+      const privateIp = a === 10 || a === 127 || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31);
+      const local = h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal') || h.includes(':') || !h.includes('.') || privateIp;
+      return u.protocol === 'https:' && !local;
+    } catch { return false; }
+  })();
+
   app.use(helmet({
     // the SPA uses CSS-in-JS (Ant Design), hence inline styles; everything else is same-origin
     contentSecurityPolicy: {
@@ -45,6 +58,7 @@ export async function createApp() {
         'font-src': ["'self'", 'data:'],
         'connect-src': ["'self'"],
         'object-src': ["'none'"],
+        'frame-src': officeViewerOn ? ["'self'", 'https://view.officeapps.live.com'] : ["'self'"],
         'frame-ancestors': ["'none'"],
         'upgrade-insecure-requests': config.env === 'production' ? [] : null,
       },
@@ -81,7 +95,7 @@ export async function createApp() {
       outputs: lo ? ['docx', 'doc'] : ['docx'],
       accept: ACCEPTED_EXTENSIONS.filter((e) => lo || !['.doc', '.docx', '.odt', '.rtf', '.ppt', '.pptx', '.odp', '.xls', '.xlsx', '.ods', '.html', '.htm'].includes(e)),
       limits: { maxUploadMb: config.maxUploadMb },
-      features: { ocr: true, ocrLanguages: ['ar', 'en'], quranCheck: true, libreOffice: lo },
+      features: { officeViewer: officeViewerOn ? { available: true, baseUrl: config.publicUrl } : { available: false }, ocr: true, ocrLanguages: ['ar', 'en'], quranCheck: true, libreOffice: lo, ai: visionStatus() },
       retentionMinutes: config.retentionMinutes,
     });
   });
@@ -150,7 +164,8 @@ export async function createApp() {
   // Served through res.download (send): HEAD, Range / If-Range, ETag, Accept-Ranges and a correct
   // Content-Length. Browsers and external download managers (IDM, NDM, ...) re-request the URL with
   // HEAD and parallel Range requests, so a plain piped stream is not enough for them.
-  api.get('/jobs/:id/download', (req, res, next) => {
+  // `document.docx` is the same file under a name that ends in the extension, which Microsoft's viewer expects
+  api.get(['/jobs/:id/download', '/jobs/:id/document.docx'], (req, res, next) => {
     const job = jobs.get(req.params.id);
     if (!job || job.status !== 'done' || !job.output || !existsSync(job.output.path)) {
       return res.status(404).json({ error: 'File not available (it may have expired)' });

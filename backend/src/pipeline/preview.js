@@ -5,16 +5,16 @@ import path from 'node:path';
 
 const round = (n) => Math.round(n * 10) / 10;
 
-const simplifyRuns = (runs) => runs.map((r) => {
+const simplifyRuns = (runs, hl) => runs.map((r) => {
   const o = { x: r.text };
-  if (r.bold) o.b = 1;
+  if (r.bold || r.verse) o.b = 1; // verses are set heavier, as in the Word file
   if (r.italic) o.i = 1;
-  if (r.lowConf) o.l = 1;
+  if (r.lowConf && hl) o.l = 1; // doubtful words are marked only when the option is on
   if (r.fs) o.s = round(r.fs);
   return o;
 });
 
-function simplifyPara(p, before = 0) {
+function simplifyPara(p, before = 0, hl = false) {
   return {
     t: 'p',
     dir: p.dir,
@@ -22,11 +22,11 @@ function simplifyPara(p, before = 0) {
     fs: round(p.fs || 12),
     sb: round(before),
     lh: p.lineGap ? round(p.lineGap) : undefined,
-    runs: simplifyRuns(p.runs),
+    runs: simplifyRuns(p.runs, hl),
   };
 }
 
-async function simplifyPage(page, previewDir) {
+async function simplifyPage(page, previewDir, hl = false) {
   const { margins, blocks } = page;
   const out = [];
   let prevBottom = null;
@@ -40,13 +40,13 @@ async function simplifyPage(page, previewDir) {
         before = Math.min(before, 220);
         prevBottom = b.lastBaseline + lh * 0.2;
       }
-      out.push(simplifyPara(b, before));
+      out.push(simplifyPara(b, before, hl));
     } else if (b.type === 'table') {
       out.push({
         t: 't',
         rtl: !!b.rtl,
         widths: b.colWidths.map(round),
-        cells: b.cells.map((c) => ({ r: c.r, c: c.c, rs: c.rowspan, cs: c.colspan, ps: c.paras.map((p) => simplifyPara(p)) })),
+        cells: b.cells.map((c) => ({ r: c.r, c: c.c, rs: c.rowspan, cs: c.colspan, ps: c.paras.map((p) => simplifyPara(p, 0, hl)) })),
         rows: b.nR,
       });
       prevBottom = b.bbox.y1;
@@ -72,9 +72,9 @@ async function simplifyPage(page, previewDir) {
 export async function savePreview(pages, previewDir, extra = {}) {
   await mkdir(previewDir, { recursive: true });
   const lines = [];
-  for (const p of pages) lines.push(JSON.stringify(await simplifyPage(p, previewDir)));
+  for (const p of pages) lines.push(JSON.stringify(await simplifyPage(p, previewDir, !!extra.highlight)));
   await writeFile(path.join(previewDir, 'preview.ndjson'), lines.join('\n'), 'utf8');
-  await writeFile(path.join(previewDir, 'meta.json'), JSON.stringify({ total: pages.length, ...extra }), 'utf8');
+  await writeFile(path.join(previewDir, 'meta.json'), JSON.stringify({ total: pages.length, ...extra, highlight: undefined }), 'utf8');
 }
 
 export async function readPreview(previewDir, from, count) {

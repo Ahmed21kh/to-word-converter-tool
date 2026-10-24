@@ -1,6 +1,7 @@
 import { createApp } from './app.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
+import { ensureLlamaServer, stopLlamaServer } from './services/llama-server.js';
 
 const { app, jobs } = await createApp();
 
@@ -18,6 +19,8 @@ server.once('error', (err) => {
   }
   process.exit(1);
 });
+// the local Qari-OCR model (VISION_PROVIDER=llamacpp) starts together with the API; the first job waits for it if needed
+if (process.env.QARI_EAGER === '1') ensureLlamaServer().catch((err) => logger.error({ err: err.message }, 'AI reader not available (pages fall back to the standard OCR)'));
 // long uploads / SSE connections
 server.requestTimeout = 0;
 server.headersTimeout = 65_000;
@@ -30,6 +33,7 @@ async function shutdown(signal) {
   logger.info({ signal }, 'shutting down');
   server.close();
   await jobs.shutdown().catch(() => {});
+  stopLlamaServer();
   process.exit(0);
 }
 process.on('SIGINT', () => shutdown('SIGINT'));

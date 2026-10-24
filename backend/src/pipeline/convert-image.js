@@ -3,6 +3,8 @@ import path from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import sharp from 'sharp';
 import { recognize } from './ocr.js';
+import { ocrLang } from './process-page.js';
+import { prepareForOcr } from './scan-clean.js';
 import { contentBox } from './page-extract.js';
 import { buildDocx } from './docx-builder.js';
 import { runQuranGuard, buildReport } from './convert-pdf.js';
@@ -47,10 +49,18 @@ async function pageModel(file, n, options, workDir) {
       meta: { ...info, method: 'image' },
     };
   }
-  const res = await recognize(png, {
-    lang: options.language === 'en' ? 'eng' : 'ara+eng',
+  // crop the decorative frame, drop diacritics on vowelled pages, normalise the text size
+  const grayRaw = await sharp(png).grayscale().raw().toBuffer({ resolveWithObject: true });
+  const prep = options.language === 'en'
+    ? { gray: new Uint8Array(grayRaw.data), width: grayRaw.info.width, height: grayRaw.info.height, geometry: {} }
+    : await prepareForOcr(new Uint8Array(grayRaw.data), grayRaw.info.width, grayRaw.info.height, {});
+  const prepared = await sharp(Buffer.from(prep.gray.buffer, prep.gray.byteOffset, prep.gray.length), { raw: { width: prep.width, height: prep.height, channels: 1 } }).png().toBuffer();
+  const res = await recognize(prepared, {
+    lang: ocrLang(options.language),
     dpi: effDpi,
     lowConfidence: options.highlightUncertain ? 60 : -1,
+    geometry: prep.geometry,
+    prepared: true,
   });
   const paras = res.paragraphs;
   const text = paras.map((p) => p.runs.map((r) => r.text).join('')).join(' ');

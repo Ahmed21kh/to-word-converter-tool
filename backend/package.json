@@ -16,6 +16,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.2.0",
     "@napi-rs/canvas": "^1.0.13",
     "@tesseract.js-data/ara": "^1.0.0",
     "@tesseract.js-data/eng": "^1.0.0",
@@ -32,7 +33,7 @@
     "tesseract.js": "^7.0.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

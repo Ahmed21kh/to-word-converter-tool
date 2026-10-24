@@ -9,18 +9,18 @@ automatically.
 npm install          # also copies the Arabic/English OCR models into data/tessdata (postinstall)
 npm run dev          # nodemon (restarts on changes in src/ and data/; ignores storage/ and test/)
 npm start            # production
-npm test             # node --test (19 tests)
+npm test             # node --test (25 tests)
 npm run fixtures     # (re)generate test PDFs with headless Edge/Chrome
 ```
 
-If you see *"Port 4000 is already in use"* another copy is running: stop it, or use `PORT=4001 npm run dev`
+If you see *"Port 4100 is already in use"* another copy is running: stop it, or use `PORT=4101 npm run dev`
 (and set `VITE_DEV_API=http://localhost:4001` for the frontend dev server).
 
 ## Configuration (environment variables, see `.env.example`)
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `PORT` | 4000 | HTTP port |
+| `PORT` | 4100 | HTTP port |
 | `WORKERS` | CPU cores − 1 (max 6) | page worker threads (speed vs. memory) |
 | `MAX_CONCURRENT_JOBS` | 2 | documents converted at once; others wait in a queue |
 | `MAX_UPLOAD_MB` | 500 | upload size limit |
@@ -31,6 +31,25 @@ If you see *"Port 4000 is already in use"* another copy is running: stop it, or 
 | `DATA_DIR` | `./storage` | uploads / results |
 | `SOFFICE_PATH` | auto-detect | LibreOffice binary (enables `.doc` output and Office/RTF input) |
 | `FRONTEND_DIST` | `../frontend/dist` | built frontend to serve |
+| `VISION_PROVIDER` | *(empty = off)* | `claude` (Anthropic API, needs `ANTHROPIC_API_KEY`), `llamacpp` (local **Qari-OCR**, an Arabic OCR model trained on diacritised text; start it with `scripts/start-qari.ps1`) or `ollama` (a general local model): enables the **AI** reading engine |
+| `LLAMA_URL` | `http://127.0.0.1:8081` | where the Qari-OCR server listens (`llamacpp` provider). The API **starts it by itself** (and stops it on exit); a server that is already running is reused |
+| `QARI_DIR` | `E:/ollama/qari` | folder with `model.gguf` and `mmproj.gguf` (use forward slashes in `.env`) |
+| `LLAMA_SERVER_EXE` | *(found next to Ollama)* | path of `llama-server.exe` if it is not found automatically |
+| `LLAMA_PARALLEL` | *auto* | text lines the Qari server reads at once: 4 with a 6 GB+ GPU, 2 with 4.5 GB+, 1 below. Only the speed changes, never the text |
+| `QARI_IDLE_SECONDS` | 120 | the Qari server gives back its GPU and RAM (about 3.6 GB + 0.6 GB) after this many seconds without work and wakes up in ~3 s on the next page; 0 keeps it loaded |
+| `QARI_GPU` | *auto* | `0` runs Qari on the CPU (also chosen when no NVIDIA GPU with 3.8 GB+ is found): slower, same result |
+| `QARI_EAGER` | 0 | `1` starts the Qari server together with the API instead of at the first AI job |
+| `VISION_MODEL` | `claude-opus-5-5` / `qwen2.5vl:7b` | model used by the AI engine (`claude-sonnet-5-5` is about half the price) |
+| `OLLAMA_URL` | `http://localhost:11434` | where Ollama listens |
+| `OLLAMA_NUM_CTX` | 6144 | context size for whole-page reading with the local model (6144 fits an 8 GB GPU entirely; 8192 spills to the CPU and is slower) |
+| `VISION_MODE` | `lines` (Ollama) | `lines` = the local model reads every text line separately (more accurate, tells which words it is unsure about), `page` = one request per page. Claude always reads the whole page |
+| `VISION_LINE_PARALLEL` | 4 | text lines sent to the local model at the same time. This only speeds things up when Ollama itself runs with `OLLAMA_NUM_PARALLEL=3` (measured: 30 s → 17 s per page on an 8 GB GPU, same accuracy); with Ollama's default of 1 the lines simply queue |
+| `VISION_LINE_SCALE` | 1.0 | enlargement of each line image before the local model reads it. Measured with Qari-OCR on two pages: 1.0 reads 98.4-98.8% of the letters, the old 1.4 only 91.8-98.2%, and is slower: it was trained on normal-size text. (The general Ollama model preferred 1.4) |
+| `VISION_IMAGE_DPI` | 200 | resolution the page is rendered at for the AI engine |
+| `AI_FLAG_CONF` | 0.5 | words the AI reading is less sure about than this are highlighted yellow in Word, with the other possible spellings in a Word comment |
+| `VISION_TIMEOUT_MS` | 170000 | how long one AI page request may take |
+| `AI_CONCURRENCY` | 2 (Ollama) / 4 (Claude) | AI pages processed at the same time (a local model answers one at a time) |
+| `PUBLIC_URL` | *(empty)* | public **https** address of the site, e.g. `https://pdf.example.com`. Turns on the optional **Word view (Microsoft)** tab in the preview: Microsoft's online viewer opens the converted file from `PUBLIC_URL/api/jobs/<id>/document.docx`. Read-only, sends the document to Microsoft, and does not work on `localhost` or private addresses. |
 
 ## API
 
@@ -47,7 +66,7 @@ If you see *"Port 4000 is already in use"* another copy is running: stop it, or 
 | `GET /api/jobs/:id/download` | the file (`HEAD`, `Range`, `ETag` supported) |
 | `DELETE /api/jobs/:id` | cancel / delete now |
 
-Options: `format` (`docx`\|`doc`), `mode` (`smart`\|`ocr`\|`exact`), `language` (`ar`\|`en`), `quran` (`correct`\|`verify`\|`off`),
+Options: `format` (docx or doc), `mode` (smart, ocr or exact), `language` (`ar` = Arabic OCR model, `mixed` = Arabic + English, `en`), `engine` (`standard` = free Tesseract, `ai` = vision model, needs `VISION_PROVIDER`), `quran` (correct, verify or off), `highlightUncertain`, `detectHeadings`, `arabicFont`, `latinFont`.
 `highlightUncertain`, `detectHeadings`, `arabicFont`, `latinFont`.
 
 ## Security & performance notes

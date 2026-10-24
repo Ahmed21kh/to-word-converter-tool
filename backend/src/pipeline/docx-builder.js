@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, ImageRun, WidthType, AlignmentType,
   HeadingLevel, SectionType, LineRuleType, TableLayoutType, PageOrientation, VerticalAlign,
+  CommentRangeStart, CommentRangeEnd, CommentReference, BorderStyle,
 } from 'docx';
 import { ARABIC_ANY, ARABIC_LETTER, UNMAPPED } from './arabic.js';
 
@@ -53,11 +54,29 @@ function fontSet(name) {
   return { ascii: name, hAnsi: name, cs: name, eastAsia: name };
 }
 
+// a word the reader was unsure about carries its other possible readings as a Word comment (r.alts)
+function addComment(o, alts) {
+  const id = o.comments.length;
+  o.comments.push({
+    id,
+    author: 'AI',
+    initials: 'AI',
+    date: new Date(),
+    children: [new Paragraph({
+      bidirectional: true,
+      children: [new TextRun({ text: `${o.commentLabel || 'قراءات أخرى محتملة'}: ${alts.join(' / ')}`, font: fontSet(o.arabicFont), rightToLeft: true })],
+    })],
+  });
+  return id;
+}
+
 function runsToTextRuns(runs, par, o) {
   const out = [];
   const rtlPar = par.dir === 'rtl';
   for (const r of runs) {
     if (!r.text) continue;
+    const cid = o.highlightUncertain && r.alts && r.alts.length && o.comments ? addComment(o, r.alts) : -1;
+    if (cid >= 0) out.push(new CommentRangeStart(cid));
     for (const seg of segmentText(r.text, rtlPar)) {
       const isAr = seg.kind === 'ar' || (seg.kind === 'bad' && rtlPar);
       const fontName = isAr ? o.arabicFont : o.latinFont;
@@ -68,16 +87,17 @@ function runsToTextRuns(runs, par, o) {
         font: fontSet(fontName),
         size,
         sizeComplexScript: size,
-        bold: !!r.bold,
-        boldComplexScript: !!r.bold,
+        bold: !!(r.bold || r.verse),
+        boldComplexScript: !!(r.bold || r.verse),
         italics: !!r.italic,
         italicsComplexScript: !!r.italic,
         rightToLeft: isAr,
         language: isAr ? { value: 'en-US', bidirectional: 'ar-SA' } : { value: 'en-US' },
-        highlight: bad || r.lowConf ? 'yellow' : undefined,
+        highlight: bad || (o.highlightUncertain && r.lowConf) ? 'yellow' : undefined,
         color: bad ? 'C00000' : undefined,
       }));
     }
+    if (cid >= 0) out.push(new CommentRangeEnd(cid), new TextRun({ children: [new CommentReference(cid)] }));
   }
   return out;
 }
@@ -102,6 +122,8 @@ function buildParagraph(par, ctx) {
     bidirectional: par.dir === 'rtl',
     alignment: ALIGN[par.align],
     heading: headingFor(par, bodyFs, o),
+    indent: par.firstLine ? { firstLine: tw(par.firstLine) } : undefined,
+    border: par.ruleAbove ? { top: { style: BorderStyle.SINGLE, size: 6, space: 8, color: '000000' } } : undefined,
     spacing: {
       before: noSpacing ? 0 : tw(Math.min(spaceBefore, 220)),
       after: 0,
@@ -241,7 +263,8 @@ async function buildSection(page, bodyFs, o) {
  * @param o { arabicFont, latinFont, detectHeadings, title, pageDir }
  * @returns {Promise<Buffer>}
  */
-export async function buildDocx(pages, o) {
+export async function buildDocx(pages, opts) {
+  const o = { ...opts, comments: [] };
   const bodyFs = documentBodySize(pages);
   const sections = [];
   for (const p of pages) sections.push(await buildSection(p, bodyFs, o));
@@ -252,6 +275,7 @@ export async function buildDocx(pages, o) {
     title: o.title || 'Converted document',
     description: 'Converted from PDF',
     features: { updateFields: false },
+    comments: { children: o.comments },
     styles: {
       default: {
         document: {

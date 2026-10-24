@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => {
     plugins: [react(), tailwindcss()],
     server: {
       port: 5173,
-      proxy: { '/api': { target: env.VITE_DEV_API || 'http://localhost:4000', changeOrigin: true } },
+      proxy: { '/api': { target: env.VITE_DEV_API || 'http://localhost:4100', changeOrigin: true } },
     },
     ssr: {
       // bundle everything: some UI packages ship extension-less ESM imports that Node cannot resolve

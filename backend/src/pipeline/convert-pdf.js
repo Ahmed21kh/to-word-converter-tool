@@ -4,16 +4,18 @@ import { guardParagraph } from './quran.js';
 import { buildDocx } from './docx-builder.js';
 import { UNMAPPED } from './arabic.js';
 import { savePreview } from './preview.js';
+import { visionStatus } from './vision-ocr.js';
 
 export const DEFAULT_OPTIONS = {
   format: 'docx', // docx | doc
   mode: 'smart', // smart | ocr | exact
-  language: 'ar', // ar | en | auto
+  language: 'ar', // ar (Arabic OCR model) | mixed (Arabic + English) | en
+  engine: 'standard', // standard (free Tesseract) | ai (vision model, needs VISION_PROVIDER)
   quran: 'correct', // correct | verify | off
   ocr: 'auto', // auto | never
   arabicFont: 'Traditional Arabic',
   latinFont: 'Times New Roman',
-  highlightUncertain: true,
+  highlightUncertain: false, // doubtful words: yellow highlight + comment, only when asked
   detectHeadings: true,
 };
 
@@ -22,9 +24,10 @@ export function normalizeOptions(input = {}) {
   const o = { ...DEFAULT_OPTIONS };
   o.format = pick(input.format, ['docx', 'doc'], o.format);
   o.mode = pick(input.mode, ['smart', 'ocr', 'exact'], o.mode);
-  o.language = pick(input.language, ['ar', 'en', 'auto'], o.language);
+  o.language = pick(input.language, ['ar', 'en', 'mixed'], o.language);
   o.quran = pick(input.quran, ['correct', 'verify', 'off'], o.quran);
   o.ocr = pick(input.ocr, ['auto', 'never'], o.ocr);
+  o.engine = pick(input.engine, ['standard', 'ai'], o.engine);
   const font = (v, d) => (typeof v === 'string' && /^[\p{L}\p{N} \-]{2,40}$/u.test(v) ? v : d);
   o.arabicFont = font(input.arabicFont, o.arabicFont);
   o.latinFont = font(input.latinFont, o.latinFont);
@@ -98,10 +101,18 @@ export async function convertPdf(ctx) {
       return errorPage(n, err.message);
     }
   };
-  await Promise.all(Array.from({ length: total }, (_, i) => i + 1).map(async (n) => {
-    results[n - 1] = await runPage(n);
-    done++;
-    onProgress({ phase: 'converting', done, total });
+  // A local AI model answers one page at a time, so do not queue every worker behind it (the queue wait would
+  // count against the request timeout); a cloud API takes a few pages at once.
+  const vision = options.engine === 'ai' ? visionStatus() : null;
+  const lanes = Math.max(1, Math.min(total, vision?.available ? Number(process.env.AI_CONCURRENCY) || (vision.provider === 'claude' ? 4 : 2) : total));
+  let next = 0;
+  await Promise.all(Array.from({ length: lanes }, async () => {
+    while (next < total) {
+      const n = ++next;
+      results[n - 1] = await runPage(n);
+      done++;
+      onProgress({ phase: 'converting', done, total });
+    }
   }));
   if (isCancelled()) throw new Error('cancelled');
 
@@ -127,13 +138,34 @@ export async function convertPdf(ctx) {
 
   onProgress({ phase: 'building', done: total, total });
   const pageModels = results.map((r) => r.model);
-  if (ctx.previewDir) await savePreview(pageModels, ctx.previewDir, { name: ctx.title, rtl: options.language !== 'en' });
+  unifyAiFontSize(pageModels);
+  if (ctx.previewDir) await savePreview(pageModels, ctx.previewDir, { name: ctx.title, rtl: options.language !== 'en', highlight: options.highlightUncertain });
   const dirs = results.map((r) => r.meta.pageDir).filter(Boolean);
   const pageDir = dirs.filter((d) => d === 'rtl').length >= dirs.length / 2 && dirs.length ? 'rtl' : (options.language === 'en' ? 'ltr' : 'rtl');
   const buffer = await buildDocx(pageModels, { ...options, pageDir, title: ctx.title });
   await writeFile(outPath, buffer);
 
   return buildReport({ results, quran, total, startedAt: t0, bytes: buffer.length });
+}
+
+/**
+ * AI-read pages get the size measured on their own scan, which wobbles a little from page to page. A book is set in one size:
+ * every AI page uses the median body size of the document (headings stay four points larger).
+ */
+export function unifyAiFontSize(models) {
+  const ai = models.filter((m) => m.method === 'ai' && m.flow);
+  const isHeading = (b) => b.align === 'center' && b.runs[0]?.bold;
+  const sizes = ai.flatMap((m) => m.blocks.filter((b) => b.type === 'p' && !isHeading(b) && !b.footnote).map((b) => b.fs)).sort((a, b) => a - b);
+  if (ai.length < 2 || !sizes.length) return;
+  const body = sizes[Math.floor(sizes.length / 2)];
+  for (const m of ai) {
+    for (const b of m.blocks) {
+      if (b.type !== 'p') continue;
+      const fs = isHeading(b) ? body + 4 : b.footnote ? Math.round(body * (b.footRatio || 0.75) * 2) / 2 : body;
+      b.fs = fs;
+      for (const r of b.runs) r.fs = fs;
+    }
+  }
 }
 
 export function buildReport({ results, quran, total, startedAt, bytes }) {
@@ -164,8 +196,17 @@ export function buildReport({ results, quran, total, startedAt, bytes }) {
     fallbackReason: meta.fallbackReason,
     warnings: meta.warnings?.length ? meta.warnings : undefined,
   }));
+  const scan = {
+    ocrPages: results.filter(({ meta }) => meta.method === 'ocr').length,
+    diacriticsStripped: results.filter(({ meta }) => meta.diacriticsStripped).length,
+    keptAsPictures: results.filter(({ meta }) => meta.method === 'image').length,
+    aiPages: results.filter(({ meta }) => meta.method === 'ai').length,
+    aiInputTokens: results.reduce((s, { meta }) => s + (meta.aiTokens?.input || 0), 0),
+    aiOutputTokens: results.reduce((s, { meta }) => s + (meta.aiTokens?.output || 0), 0),
+  };
   return {
     pages: total,
+    scan,
     durationMs: Date.now() - startedAt,
     outputBytes: bytes,
     methods,
