@@ -200,6 +200,19 @@ export async function createApp() {
     });
   });
 
+  // pause / go on: the pages converted so far are kept (also across a server restart)
+  api.post('/jobs/:id/pause', async (req, res) => {
+    if (!jobs.get(req.params.id)) return res.status(404).json({ error: 'Job not found or expired' });
+    if (!(await jobs.pause(req.params.id))) return res.status(409).json({ error: 'Only a running or queued conversion can be paused' });
+    return res.json(jobs.publicView(jobs.get(req.params.id)));
+  });
+
+  api.post('/jobs/:id/resume', (req, res) => {
+    if (!jobs.get(req.params.id)) return res.status(404).json({ error: 'Job not found or expired' });
+    if (!jobs.resume(req.params.id)) return res.status(409).json({ error: 'The conversion is not paused' });
+    return res.json(jobs.publicView(jobs.get(req.params.id)));
+  });
+
   api.delete('/jobs/:id', async (req, res) => {
     const ok = await jobs.cancelOrDelete(req.params.id);
     return res.status(ok ? 204 : 404).end();

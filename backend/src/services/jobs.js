@@ -15,6 +15,7 @@ import { visionStatus } from '../pipeline/vision-ocr.js';
 import { ensureLlamaServer } from './llama-server.js';
 
 const PHASE_WEIGHT = { queued: 0, analyzing: 2, converting: 90, verifying: 94, building: 97, finalizing: 99, done: 100 };
+const PAUSE_TTL = 24 * 60 * 60_000;
 
 export class JobManager extends EventEmitter {
   constructor() {
@@ -86,12 +87,18 @@ export class JobManager extends EventEmitter {
       createdAt: Date.now(),
       startedAt: null,
       finishedAt: null,
+      // time spent converting, pauses not counted: activeMs so far + (now - resumedAt) while it runs
+      activeMs: 0,
+      resumedAt: null,
+      pausedAt: null,
       error: null,
       report: null,
       hasPreview: false,
       output: null,
       _input: input,
       _cancel: false,
+      _paused: false,
+      _waiters: [],
     };
     this.jobs.set(id, job);
     this.waiting.push(job);
@@ -105,7 +112,8 @@ export class JobManager extends EventEmitter {
   }
 
   publicView(job) {
-    const { _input, _cancel, report, ...rest } = job;
+    const { report, ...rest } = job;
+    for (const k of Object.keys(rest)) if (k.startsWith('_')) delete rest[k];
     return { ...rest, hasReport: !!report };
   }
 
@@ -120,9 +128,11 @@ export class JobManager extends EventEmitter {
         j.queuePosition = i + 1;
         this.#emit(j);
       });
-      if (job._cancel) continue;
+      if (job._cancel || job._paused) continue;
       this.running++;
+      job._running = true;
       this.#run(job).finally(() => {
+        job._running = false;
         this.running--;
         this.#drain();
       });
@@ -133,7 +143,8 @@ export class JobManager extends EventEmitter {
     job.phase = phase;
     job.progress = { done, total };
     const base = phase === 'converting' ? PHASE_WEIGHT.analyzing : PHASE_WEIGHT[phase] ?? 0;
-    job.percent = phase === 'converting' && total ? Math.min(90, Math.round(PHASE_WEIGHT.analyzing + (done / total) * (PHASE_WEIGHT.converting - 2))) : base;
+    // one decimal: a long book moves by less than a percent per page
+    job.percent = phase === 'converting' && total ? Math.min(90, Math.round((PHASE_WEIGHT.analyzing + (done / total) * (PHASE_WEIGHT.converting - 2)) * 10) / 10) : base;
     job.queuePosition = 0;
     const now = Date.now();
     if (!job._lastEmit || now - job._lastEmit > 250 || done === total) {
@@ -149,7 +160,9 @@ export class JobManager extends EventEmitter {
     const wantDoc = job.options.format === 'doc';
     const docxPath = path.join(dir, `${base}.docx`);
     job.status = 'processing';
-    job.startedAt = Date.now();
+    job.startedAt ||= Date.now();
+    job.resumedAt = Date.now();
+    await this.#persist(job); // a restart from here on brings the job back paused, with the pages done so far
     this.#progress(job, { phase: 'analyzing' });
     const ctx = {
       jobId: job.id,
@@ -162,6 +175,8 @@ export class JobManager extends EventEmitter {
       pool: this.workerPool,
       onProgress: (p) => this.#progress(job, p),
       isCancelled: () => job._cancel,
+      // resolves when the job may go on (at once unless it is paused); rejects when it is cancelled meanwhile
+      waitIfPaused: () => (job._paused ? new Promise((resolve, reject) => job._waiters.push({ resolve, reject })) : null),
     };
     try {
       let report;
@@ -199,6 +214,8 @@ export class JobManager extends EventEmitter {
         logger.error({ jobId: job.id, err: err.stack }, 'conversion failed');
       }
     } finally {
+      if (job.resumedAt) job.activeMs += Date.now() - job.resumedAt;
+      job.resumedAt = null;
       job.finishedAt = Date.now();
       job.queuePosition = 0;
       if (job.status === 'done') await this.#persist(job);
@@ -210,18 +227,58 @@ export class JobManager extends EventEmitter {
     }
   }
 
+  /**
+   * Pause a conversion: no new page is started (the pages being read are finished) and the time stops counting. Its pages are
+   * kept on disk, so it also goes on after a server restart.
+   */
+  async pause(id) {
+    const job = this.jobs.get(id);
+    if (!job || !['processing', 'queued'].includes(job.status)) return false;
+    job._paused = true;
+    if (job.status === 'queued') this.waiting = this.waiting.filter((j) => j !== job);
+    if (job.resumedAt) job.activeMs += Date.now() - job.resumedAt;
+    job.resumedAt = null;
+    job.pausedAt = Date.now();
+    job.status = 'paused';
+    await this.#persist(job);
+    this.#emit(job);
+    return true;
+  }
+
+  /** Go on from where the conversion was paused (or where a server restart stopped it). */
+  resume(id) {
+    const job = this.jobs.get(id);
+    if (!job || job.status !== 'paused') return false;
+    job._paused = false;
+    job.pausedAt = null;
+    const waiters = job._waiters.splice(0);
+    if (waiters.length || job._running) {
+      job.status = 'processing';
+      job.resumedAt = Date.now();
+      for (const w of waiters) w.resolve();
+    } else { // not started yet, or stopped by a restart: back into the queue, its saved pages are reused
+      job.status = 'queued';
+      this.waiting.push(job);
+      job.queuePosition = this.waiting.length;
+    }
+    this.#emit(job);
+    this.#drain();
+    return true;
+  }
+
   async cancelOrDelete(id) {
     const job = this.jobs.get(id);
     if (!job) return false;
     job._cancel = true;
     this.workerPool.cancel(id);
     this.waiting = this.waiting.filter((j) => j !== job);
-    if (job.status === 'queued') {
+    for (const w of job._waiters?.splice(0) || []) w.reject(new Error('cancelled'));
+    if (job.status === 'queued' || (job.status === 'paused' && !job._running)) {
       job.status = 'cancelled';
       job.finishedAt = Date.now();
       this.#emit(job);
     }
-    if (job.status !== 'processing') await this.#remove(job);
+    if (job.status !== 'processing' && !job._running) await this.#remove(job);
     return true;
   }
 
@@ -235,6 +292,8 @@ export class JobManager extends EventEmitter {
     const now = Date.now();
     for (const job of this.jobs.values()) {
       if (job.finishedAt && now - job.finishedAt > ttl) await this.#remove(job);
+      // a paused conversion keeps its source file and pages for a day
+      else if (job.status === 'paused' && job.pausedAt && now - job.pausedAt > PAUSE_TTL && !job._running) await this.#remove(job);
     }
     // orphans from a previous run
     const root = path.join(config.dataDir, 'jobs');
@@ -246,10 +305,13 @@ export class JobManager extends EventEmitter {
     }
   }
 
-  /** Finished jobs are saved next to their files so a server restart (deploy, crash, nodemon) does not lose them. */
+  /**
+   * Jobs are saved next to their files so a server restart (deploy, crash, nodemon) does not lose them: finished ones, and the
+   * ones being converted (with their source file), which come back paused.
+   */
   async #persist(job) {
-    // eslint-disable-next-line no-unused-vars
-    const { _input, _cancel, _lastEmit, _officeOut, ...data } = job;
+    const data = { input: job._input };
+    for (const [k, v] of Object.entries(job)) if (!k.startsWith('_')) data[k] = v;
     try {
       await writeFile(path.join(this.jobDir(job.id), 'job.json'), JSON.stringify(data));
     } catch (err) {
@@ -257,7 +319,7 @@ export class JobManager extends EventEmitter {
     }
   }
 
-  /** Reload finished jobs from disk at startup (downloads, previews and reports keep working after a restart). */
+  /** Reload jobs from disk at startup: finished ones (downloads, previews and reports keep working) and interrupted ones (paused). */
   async restore() {
     const root = path.join(config.dataDir, 'jobs');
     const dirs = await readdir(root).catch(() => []);
@@ -265,13 +327,21 @@ export class JobManager extends EventEmitter {
     for (const id of dirs) {
       try {
         const data = JSON.parse(await readFile(path.join(root, id, 'job.json'), 'utf8'));
-        if (data.status !== 'done' || !data.output) continue;
-        await stat(data.output.path);
-        this.jobs.set(data.id, { ...data, _cancel: false });
+        const { input, ...view } = data;
+        if (data.status === 'done' && data.output) {
+          await stat(data.output.path);
+          this.jobs.set(data.id, { ...view, _cancel: false, _paused: false, _waiters: [] });
+        } else if (['processing', 'paused', 'queued'].includes(data.status) && input) {
+          await stat(input);
+          this.jobs.set(data.id, {
+            ...view, status: 'paused', resumedAt: null, pausedAt: data.pausedAt || Date.now(), queuePosition: 0,
+            _input: input, _cancel: false, _paused: true, _waiters: [],
+          });
+        } else continue;
         restored++;
-      } catch { /* not a finished job (or files already deleted): ignore */ }
+      } catch { /* not a job we can bring back (or its files are gone): ignore */ }
     }
-    if (restored) logger.info({ restored }, 'restored finished jobs from disk');
+    if (restored) logger.info({ restored }, 'restored jobs from disk');
   }
 
   stats() {

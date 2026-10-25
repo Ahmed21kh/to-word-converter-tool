@@ -12,7 +12,7 @@ const PreviewDrawer = lazy(() => import('./PreviewDrawer.jsx'));
 
 const DEFAULT_OPTIONS = {
   format: 'docx', mode: 'smart', language: 'ar', engine: 'standard', quran: 'correct',
-  highlightUncertain: false, detectHeadings: true, arabicFont: 'Traditional Arabic',
+  highlightUncertain: false, detectHeadings: true, frontAsPictures: true, arabicFont: 'Traditional Arabic',
 };
 const FALLBACK_CAPS = {
   accept: ['.pdf', '.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.bmp', '.gif', '.txt', '.md', '.csv'],
@@ -31,7 +31,7 @@ export default function ConverterCard({ onCapabilities }) {
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
-  const { items, add, cancel, remove, retry, clearFinished } = useConversions(useCallback(() => optionsRef.current, []));
+  const { items, add, cancel, pause, resume, remove, retry, clearFinished } = useConversions(useCallback(() => optionsRef.current, []));
 
   // restore saved options + load server capabilities (after mount: keeps SSR/hydration identical)
   useEffect(() => {
@@ -154,6 +154,12 @@ export default function ConverterCard({ onCapabilities }) {
         <span className="font-semibold">{t('converter.options.headings')}</span>
         <Switch checked={options.detectHeadings} onChange={(v) => setOpt('detectHeadings', v)} />
       </label>
+      {options.engine === 'ai' && (
+        <label className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+          <span className="font-semibold">{t('converter.options.frontAsPictures')}</span>
+          <Switch checked={options.frontAsPictures !== false} onChange={(v) => setOpt('frontAsPictures', v)} />
+        </label>
+      )}
     </div>
   );
 
@@ -207,7 +213,7 @@ export default function ConverterCard({ onCapabilities }) {
               )}
               <ul className="m-0 grid list-none gap-3 p-0">
                 {items.map((item) => (
-                  <FileItem key={item.uid} item={item} onCancel={cancel} onRemove={remove} onRetry={retry} onReport={(i) => setReport({ id: i.job.id, name: i.name })} onPreview={(i) => setPreview({ id: i.job.id, name: i.name })} />
+                  <FileItem key={item.uid} item={item} onCancel={cancel} onPause={pause} onResume={resume} onRemove={remove} onRetry={retry} onReport={(i) => setReport({ id: i.job.id, name: i.name })} onPreview={(i) => setPreview({ id: i.job.id, name: i.name })} />
                 ))}
               </ul>
             </>

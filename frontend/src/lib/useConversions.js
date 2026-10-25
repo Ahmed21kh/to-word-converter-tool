@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { uploadFile, subscribeJob, deleteJob, TERMINAL } from './api.js';
+import { uploadFile, subscribeJob, deleteJob, pauseJob, resumeJob, TERMINAL } from './api.js';
 
 const MAX_PARALLEL_UPLOADS = 2;
 let counter = 0;
@@ -72,6 +72,17 @@ export function useConversions(getOptions) {
     patch(uid, (cur) => (TERMINAL.includes(cur.status) ? {} : { status: 'cancelled' }));
   }, [patch]);
 
+  // pause / go on: the server keeps the pages done so far; the row follows the job's own updates
+  const setPaused = useCallback((uid, paused) => {
+    const jobId = handles.current.get(uid)?.jobId;
+    if (!jobId) return;
+    (paused ? pauseJob : resumeJob)(jobId)
+      .then((view) => patch(uid, (cur) => (TERMINAL.includes(cur.status) ? {} : { job: view, status: view.status })))
+      .catch(() => {});
+  }, [patch]);
+  const pause = useCallback((uid) => setPaused(uid, true), [setPaused]);
+  const resume = useCallback((uid) => setPaused(uid, false), [setPaused]);
+
   const remove = useCallback((uid) => {
     const h = handles.current.get(uid);
     waiting.current = waiting.current.filter((i) => i.uid !== uid);
@@ -104,5 +115,5 @@ export function useConversions(getOptions) {
     }
   }, []);
 
-  return { items, add, cancel, remove, retry, clearFinished };
+  return { items, add, cancel, pause, resume, remove, retry, clearFinished };
 }

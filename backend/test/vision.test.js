@@ -200,7 +200,7 @@ test('a local model reads the page line by line and says which words it is unsur
     lineAnswers.length = 0;
     lineAnswers.push('وقد جاء زيد', 'ثم ذهب');
     seen.length = 0;
-    const r = await readPageWithAi(jpeg);
+    const r = await readPageWithAi(jpeg, { probs: true }); // probabilities: the "highlight uncertain words" option
     assert.equal(r.mode, 'lines');
     assert.equal(seen.length, 2, 'one request per line');
     assert.equal(seen[0].ollama.logprobs, true);
@@ -245,7 +245,7 @@ test('the Qari-OCR provider (llama.cpp server) reads a page and a line with prob
     const jpeg = await sharp(px, { raw: { width: w, height: h, channels: 1 } }).jpeg({ quality: 95 }).toBuffer();
     lineAnswers.length = 0;
     lineAnswers.push('وقد جاء');
-    const r = await readPageWithAi(jpeg);
+    const r = await readPageWithAi(jpeg, { probs: true });
     assert.equal(r.mode, 'lines');
     const doubtful = r.paragraphs[0].runs.find((x) => x.lowConf);
     assert.equal(doubtful.text, 'وقد');

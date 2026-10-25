@@ -52,10 +52,12 @@ function gpuMemoryMiB() {
  * How to run the model on THIS machine. The model, its settings and so the text it reads are the same everywhere; only the speed and the
  * memory differ: text lines read at once (slots) follow the GPU memory, and a machine without a usable NVIDIA GPU (or QARI_GPU=0) runs it
  * on the CPU, slower but with identical results. LLAMA_PARALLEL overrides the number of slots.
+ * Measured on an 8 GB card (Quadro RTX 4000): 4 slots wrote 77 tokens/s in total, 8 slots 126 (151 without token probabilities);
+ * the 2B model and its 8 x 3072-token cache use about 4 GB.
  */
 export function runPlan(vram = gpuMemoryMiB(), env = process.env) {
   const gpu = env.QARI_GPU !== '0' && vram !== null && vram >= 3800;
-  const auto = !gpu ? 1 : vram >= 6000 ? 4 : vram >= 4500 ? 2 : 1;
+  const auto = !gpu ? 1 : vram >= 7000 ? 8 : vram >= 6000 ? 4 : vram >= 4500 ? 2 : 1;
   const forced = Number(env.LLAMA_PARALLEL);
   return { gpu, parallel: forced > 0 ? forced : auto };
 }

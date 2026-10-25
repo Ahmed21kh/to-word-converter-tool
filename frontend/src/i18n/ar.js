@@ -124,6 +124,7 @@ const ar = {
       quranOff: 'إيقاف',
       highlight: 'تظليل الكلمات غير المؤكدة',
       headings: 'اكتشاف العناوين',
+      frontAsPictures: 'الغلاف وصفحات العنوان كصور',
       font: 'خط النص العربي في Word',
     },
     status: {
@@ -137,11 +138,13 @@ const ar = {
       done: 'اكتمل',
       error: 'فشل التحويل',
       cancelled: 'أ\u064Fلغي',
+      paused: 'متوقف مؤقتًا',
     },
+    elapsed: 'المستغرق {t}',
     eta: 'المتبقي تقريب\u064Bا {t}',
     etaSeconds: '{n} ث',
     etaMinutes: '{n} د',
-    actions: { download: 'تنزيل', preview: 'معاينة', report: 'التقرير', cancel: 'إلغاء', remove: 'إزالة', retry: 'إعادة المحاولة', clear: 'مسح القائمة' },
+    actions: { download: 'تنزيل', preview: 'معاينة', report: 'التقرير', cancel: 'إلغاء', remove: 'إزالة', retry: 'إعادة المحاولة', clear: 'مسح القائمة', pause: 'إيقاف مؤقت', resume: 'استكمال' },
     summary: { pages: '{n} صفحة', needReview: '{n} صفحة تحتاج مراجعة', allGood: 'لا ملاحظات' },
     errors: {
       tooLarge: 'حجم الملف أكبر من الحد المسموح ({size} ميغابايت)',

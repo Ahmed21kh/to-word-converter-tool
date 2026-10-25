@@ -29,6 +29,15 @@ export async function deleteJob(id) {
   await fetch(`${BASE}/api/jobs/${id}`, { method: 'DELETE' }).catch(() => {});
 }
 
+/** Pause a running conversion (the pages done so far are kept) or let it go on. Returns the job view. */
+export async function pauseJob(id) {
+  return json(await fetch(`${BASE}/api/jobs/${id}/pause`, { method: 'POST' }));
+}
+
+export async function resumeJob(id) {
+  return json(await fetch(`${BASE}/api/jobs/${id}/resume`, { method: 'POST' }));
+}
+
 /** @returns {{promise: Promise<object>, abort: () => void}} */
 export function uploadFile(file, options, onProgress) {
   const xhr = new XMLHttpRequest();

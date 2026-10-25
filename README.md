@@ -78,6 +78,25 @@ Then measure it on your own page before relying on it: `node backend/scripts/ai-
 (roughly tens of seconds per page); on a CPU-only machine use `qwen2.5vl:3b` and expect minutes per page. The download is about 7.5 GB in total.
 A web deployment runs Ollama on the **server** (the visitors' devices need nothing).
 
+#### Quran verses in AI-read text
+
+The line reader cannot print the ornate brackets: it writes ﴿ ﴾ as `( )`, `*`, `؟`, `»` or a short junk word, confuses dotted letters
+(ن/ت/ي, ع/غ, ر/ز), runs words together and misreads the small citation digits. The Quran guard therefore, for AI-read pages:
+
+* finds a verse by its words between such delimiters (a letter-skeleton comparison tolerates the dot errors), grows it while the next
+  printed word is the next word of the Mushaf, and turns the delimiters around it into ﴿ ﴾;
+* leaves the book's own words alone: text with no bracket on either side, a hadith in « », a heading, and the author's words inside a
+  quotation (`- يا مُحَمَّدُ -`, `- فَاسْتَمِعْ -`, kept between dashes);
+* reads short quotations (`﴿وَٱلۡإِنجِيلَ﴾`, `﴿كُن فَيَكُونُ﴾`) only next to the verses the page is explaining, and takes the nearest
+  place for a phrase the Quran repeats;
+* sets the citation numbers from the verse found when the match is certain (`[آل عمران: ١١-١٢]` → `[آل عمران: ٢١-٢٦]`; a range
+  starts at the first verse quoted since the previous citation); every change is listed in the report;
+* puts back the ﷺ ligature the reader writes as a junk word after "رسول الله" / "النبي".
+
+Measured on 11 pages of *al-Rawd al-Unuf* (vol. 5): 86 quotations, all matched to the Mushaf, 16 misread citation numbers set right,
+5 ﷺ restored; 64 s for the 11 pages on an 8 GB GPU. A text line that comes out much shorter than its ink is read again enlarged
+(that brought back a verse start the reader had skipped).
+
 #### What was tried for the free engine, and what did not work
 
 Measured on one real vowelled book page (letter accuracy): plain Tesseract 54% → cropped + diacritics stripped + Arabic-only model **88%**.
@@ -90,7 +109,7 @@ Native Tesseract 5.4 with the larger "best" Arabic model was also measured on th
 
 * 650-page Arabic PDF (a different Quran verse on every page): converted in **~7.5 s** with 3 workers; **649 of 650 verses came out
   identical to the Mushaf text** and the last one was flagged for review in the report; peak server memory ≈ 0.8 GB.
-* Unit + pipeline + AI-plumbing tests: 28 passing (`npm test`).
+* Unit + pipeline + AI-plumbing tests: 51 passing (`npm test`).
 * Browser flow in Edge (upload → progress → preview → download, side menu, dark/light) with zero console errors.
 * Downloads support `HEAD` and `Range` (resume, download managers).
 
@@ -99,8 +118,9 @@ Native Tesseract 5.4 with the larger "best" Arabic model was also measured on th
 * **No tool can promise zero mistakes for every PDF.** Text-layer PDFs are very accurate; scanned pages depend on scan quality.
   The report lists pages to review and uncertain OCR words are highlighted in yellow.
 * **No free OCR reads fully diacritised Uthmani script reliably.** For scanned Mushaf pages use the *Exact look* mode.
-* Verse repair needs the verse to be wrapped in ﴿ ﴾ (or be a whole paragraph of Quran text). A verse that continues onto the next
-  page is not joined across pages.
+* Verse repair needs the verse to be wrapped in ﴿ ﴾ (or be a whole paragraph of Quran text); in AI-read text, in whatever the reader
+  made of the brackets (see above). A verse that continues onto the next page is not joined across pages, and words the reader
+  skipped inside a verse are not added back (a quotation may legitimately leave words out).
 * The output was validated by parsing the `.docx` (python-docx) and by an in-app preview; it was **not opened in Microsoft Word**
   on the development machine (none installed). Open one converted file in Word once to confirm fonts and spacing to your taste.
 * Borderless tables and multi-column layouts without clear gutters fall back to reading order.

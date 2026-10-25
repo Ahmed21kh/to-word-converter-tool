@@ -173,6 +173,7 @@ async function viaLlamaCpp(jpeg, maxTokens = 2000, { probs = false, timeoutMs, p
       max_tokens: maxTokens,
       ...(penalty ? { repeat_penalty: penalty } : {}),
       ...(probs ? { logprobs: true, top_logprobs: 4 } : {}),
+      ...(process.env.VISION_NO_CACHE ? { cache_prompt: false } : {}), // benchmarks: repeated images would be answered from the cache
       messages: [{ role: 'user', content: [
         { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}` } },
         { type: 'text', text: QARI_PROMPT },
@@ -182,6 +183,7 @@ async function viaLlamaCpp(jpeg, maxTokens = 2000, { probs = false, timeoutMs, p
   });
   if (!res.ok) throw new Error(`llama.cpp server answered HTTP ${res.status}`);
   const body = await res.json();
+  if (process.env.VISION_DEBUG && body.timings) console.error(`llama.cpp: prompt ${body.timings.prompt_n} tok ${(body.timings.prompt_ms / 1000).toFixed(2)}s, out ${body.timings.predicted_n} tok ${(body.timings.predicted_ms / 1000).toFixed(2)}s`);
   const choice = body.choices?.[0] || {};
   const logprobs = (choice.logprobs?.content || []).map((t) => ({ token: t.token, logprob: t.logprob, bytes: t.bytes, top_logprobs: t.top_logprobs || [] }));
   return { text: choice.message?.content || '', logprobs, truncated: choice.finish_reason === 'length', usage: { input_tokens: body.usage?.prompt_tokens, output_tokens: body.usage?.completion_tokens } };
@@ -192,13 +194,13 @@ async function viaLlamaCpp(jpeg, maxTokens = 2000, { probs = false, timeoutMs, p
  * @param {Buffer} jpeg page render (JPEG)
  * @returns {Promise<{paragraphs:{text:string,heading:boolean}[], noText:boolean, refused?:boolean, truncated?:boolean, usage?:object, model:string}>}
  */
-export async function readPageWithAi(jpeg, { arabicOnly = true, ptPerPx, font } = {}) {
+export async function readPageWithAi(jpeg, { arabicOnly = true, ptPerPx, font, probs = false } = {}) {
   const st = visionStatus();
   if (!st.available) throw new Error('AI reading is not configured (set VISION_PROVIDER)');
   // a local model reads far more accurately line by line (and tells how sure it is); a large cloud model reads the whole page
   const byLines = st.provider !== 'claude' && (process.env.VISION_MODE || 'lines') !== 'page';
   if (byLines) {
-    const res = await readPageByLines(jpeg, st.model, { arabicOnly, provider: st.provider, ptPerPx, font });
+    const res = await readPageByLines(jpeg, st.model, { arabicOnly, provider: st.provider, ptPerPx, font, probs });
     if (res) return res;
   }
   const out = st.provider === 'claude' ? await viaClaude(jpeg, st.model)
@@ -211,16 +213,17 @@ export async function readPageWithAi(jpeg, { arabicOnly = true, ptPerPx, font } 
 }
 
 const cleanArabicLetters = (s) => Array.from(s).filter((ch) => !(/\p{L}/u.test(ch) && !/\p{Script=Arabic}/u.test(ch))).join('');
-
 /** Words the reader is less sure about than this are highlighted in the Word file (AI_FLAG_CONF, 0..1). */
 const flagConf = () => Number(process.env.AI_FLAG_CONF) || 0.5;
 
 /**
  * Read the page one text line at a time. Returns null when no lines can be found (the caller then reads the whole page).
  * Each paragraph carries `runs`; a word the model was unsure about gets lowConf and the other possible spellings (alts).
+ * The token probabilities behind that are only asked for when they are shown (`probs`, the "highlight uncertain words" option):
+ * the server ranks its whole vocabulary on the CPU for every token it writes, which costs about a fifth of the reading time.
  * @param {Buffer} jpeg the (enhanced) page body
  */
-export async function readPageByLines(jpeg, model, { arabicOnly = true, provider = 'ollama', ptPerPx, font } = {}) {
+export async function readPageByLines(jpeg, model, { arabicOnly = true, provider = 'ollama', ptPerPx, font, probs = false } = {}) {
   const { data, info } = await sharp(jpeg).greyscale().raw().toBuffer({ resolveWithObject: true });
   const { width: w, height: h } = info;
   const boxes = segmentLines(data, w, h);
@@ -235,47 +238,55 @@ export async function readPageByLines(jpeg, model, { arabicOnly = true, provider
   const bodyH = median(boxes.filter((b) => !isFootBox(b)).map((b) => b.y1 - b.y0)) || 1;
   // Several lines at once: the model's speed is limited by memory bandwidth while it writes, so Ollama writes parallel lines
   // (OLLAMA_NUM_PARALLEL) in nearly the same time as one. Results are kept in line order.
-  const parallel = Math.max(1, Number(process.env.VISION_LINE_PARALLEL) || 4);
+  const parallel = Math.max(1, Number(process.env.VISION_LINE_PARALLEL) || 8);
+  const envNum = (name, d) => (process.env[name] !== undefined && process.env[name] !== '' && Number.isFinite(Number(process.env[name])) ? Number(process.env[name]) : d);
+  // white space kept around each line (px). Measured: tighter crops cut the image tokens by a quarter but made the reader drop words
+  const lineMargin = envNum('VISION_LINE_MARGIN', 12);
+  const linePad = envNum('VISION_LINE_PAD', 20);
+  /** Read one line (or the part [left, right) of it) and return its words. */
+  async function readBox(box, left = 0, right = w, enlarge = 1) {
+    const y0 = Math.max(0, box.y0 - lineMargin);
+    const y1 = Math.min(h, box.y1 + lineMargin);
+    const crop = await sharp(data, { raw: { width: w, height: h, channels: 1 } })
+      .extract({ left, top: y0, width: right - left, height: y1 - y0 })
+      .extend({ top: linePad, bottom: linePad, left: 20, right: 20, background: { r: 255, g: 255, b: 255 } })
+      .resize({ width: Math.min(2800, Math.round((right - left) * enlarge * (Number(process.env.VISION_LINE_SCALE) || 1.0) * (isFootBox(box) ? Math.min(1.5, Math.max(1, bodyH / (box.y1 - box.y0))) : 1))) })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+    const ask = (penalty) => (provider === 'llamacpp'
+      ? viaLlamaCpp(crop, 300, { probs, timeoutMs: 90_000, penalty })
+      : viaOllama(crop, model, LINE_SYSTEM_PROMPT, LINE_USER_PROMPT, 300, { probs, numCtx: 2048, timeoutMs: 90_000, penalty }));
+    let out;
+    try { out = await ask(); } catch { out = await ask(); } // one retry
+    let looped = out.truncated || hasLoop(out.text);
+    if (looped) { // looping on one word: read the line again with a penalty on repeats
+      try { const again = await ask(1.15); if (!again.truncated && !hasLoop(again.text)) { out = again; looped = false; } } catch { /* keep the first answer */ }
+    }
+    tokens += out.usage?.output_tokens || 0;
+    const conf = wordConfidence(out.logprobs || []);
+    const words = (conf.words.length ? conf.words : String(out.text || '').split(/\s+/).filter(Boolean).map((t) => ({ text: t, conf: 1, alts: [] })))
+      .map((x) => {
+        const text = cleanArabicLine(x.text, { arabicOnly });
+        const alts = x.alts.map((a) => cleanArabicLine(a.text, { arabicOnly })).filter((a) => a && a !== text);
+        return { text, conf: x.conf, alts: [...new Set(alts)] };
+      })
+      .filter((x) => x.text && x.text !== NO_TEXT);
+    // still looping: keep one copy of the repeated word and mark the whole line as doubtful
+    let kept = looped ? collapseLoops(words).map((x) => ({ ...x, conf: Math.min(x.conf, 0.2) })) : words;
+    // a line with hardly any diacritics was printed without them: marks the model added on its own are removed
+    if (isMostlyPlain(kept.map((x) => x.text).join(' '))) kept = kept.map((x) => ({ ...x, text: stripMarks(x.text), alts: x.alts.map((a) => stripMarks(a)) }));
+    return kept;
+  }
   const read = new Array(boxes.length);
   let next = 0;
   async function worker() {
     while (next < boxes.length) {
       const k = next++;
-      const box = boxes[k];
-      const y0 = Math.max(0, box.y0 - 12);
-      const y1 = Math.min(h, box.y1 + 12);
-      const crop = await sharp(data, { raw: { width: w, height: h, channels: 1 } })
-        .extract({ left: 0, top: y0, width: w, height: y1 - y0 })
-        .extend({ top: 20, bottom: 20, left: 20, right: 20, background: { r: 255, g: 255, b: 255 } })
-        .resize({ width: Math.min(2800, Math.round(w * (Number(process.env.VISION_LINE_SCALE) || 1.0) * (isFootBox(box) ? Math.min(1.5, Math.max(1, bodyH / (box.y1 - box.y0))) : 1))) })
-        .jpeg({ quality: 92 })
-        .toBuffer();
-      const ask = (penalty) => (provider === 'llamacpp'
-        ? viaLlamaCpp(crop, 300, { probs: true, timeoutMs: 90_000, penalty })
-        : viaOllama(crop, model, LINE_SYSTEM_PROMPT, LINE_USER_PROMPT, 300, { probs: true, numCtx: 2048, timeoutMs: 90_000, penalty }));
-      let out;
-      try { out = await ask(); } catch { out = await ask(); } // one retry
-      let looped = out.truncated || hasLoop(out.text);
-      if (looped) { // looping on one word: read the line again with a penalty on repeats
-        try { const again = await ask(1.15); if (!again.truncated && !hasLoop(again.text)) { out = again; looped = false; } } catch { /* keep the first answer */ }
-      }
-      tokens += out.usage?.output_tokens || 0;
-      const conf = wordConfidence(out.logprobs || []);
-      const words = (conf.words.length ? conf.words : conf.text.split(' ').filter(Boolean).map((t) => ({ text: t, conf: 1, alts: [] })))
-        .map((x) => {
-          const text = cleanArabicLine(x.text, { arabicOnly });
-          const alts = x.alts.map((a) => cleanArabicLine(a.text, { arabicOnly })).filter((a) => a && a !== text);
-          return { text, conf: x.conf, alts: [...new Set(alts)] };
-        })
-        .filter((x) => x.text && x.text !== NO_TEXT);
-      // still looping: keep one copy of the repeated word and mark the whole line as doubtful
-      let kept = looped ? collapseLoops(words).map((x) => ({ ...x, conf: Math.min(x.conf, 0.2) })) : words;
-      // a line with hardly any diacritics was printed without them: marks the model added on its own are removed
-      if (isMostlyPlain(kept.map((x) => x.text).join(' '))) kept = kept.map((x) => ({ ...x, text: stripMarks(x.text), alts: x.alts.map((a) => stripMarks(a)) }));
-      read[k] = { ...box, words: kept, footnote: isFootBox(box) };
+      read[k] = { ...boxes[k], words: await readBox(boxes[k]), footnote: isFootBox(boxes[k]) };
     }
   }
   await Promise.all(Array.from({ length: Math.min(parallel, boxes.length) }, worker));
+  await rereadShortLines(read, { w, readBox });
   const lines = read.filter((l) => l.words.length);
   if (!lines.length) return { paragraphs: [], noText: true, usage: { output_tokens: tokens }, model };
   // The page as it was printed: where the text block sits, how far apart its lines are, and the size that makes a line of the Word
@@ -296,6 +307,29 @@ export async function readPageByLines(jpeg, model, { arabicOnly = true, provider
   const footBoxes = lines.filter((l) => l.footnote);
   const footRatio = pitchOf(bodyBoxes) && pitchOf(footBoxes) ? Math.min(0.9, Math.max(0.62, pitchOf(footBoxes) / pitchOf(bodyBoxes))) : 0.75;
   return { paragraphs: unifyDigits(fixNoteNumbers(groupLines(lines)), arabicOnly), noText: false, usage: { output_tokens: tokens }, model, mode: 'lines', bodyPt, lineGapPt, textBox, headerBox, footRatio };
+}
+
+const lettersOf = (words) => words.reduce((n, x) => n + stripMarks(x.text).length, 0);
+
+/**
+ * The reader now and then skips part of a line (the start of a verse after its ornate bracket, the second half of a poetry line).
+ * Such a line says far fewer letters than its ink is wide, measured against the page's own full lines. It is read again enlarged
+ * (measured: the skipped words come back at 1.4x), and the new reading replaces it when it says clearly more and keeps what it said.
+ */
+export async function rereadShortLines(read, { w, readBox }) {
+  const density = (l) => lettersOf(l.words) / Math.max(1, l.x1 - l.x0);
+  const typical = median(read.filter((l) => l.words.length >= 4 && l.x1 - l.x0 > w * 0.6).map(density));
+  if (!typical) return 0;
+  let replaced = 0;
+  const short = read.filter((l) => l.words.length && l.x1 - l.x0 > w * 0.4 && density(l) < typical * 0.7);
+  await Promise.all(short.slice(0, 6).map(async (l) => {
+    const words = await readBox(l, 0, w, 1.4);
+    const before = new Set(l.words.map((x) => stripMarks(x.text)));
+    const kept = words.filter((x) => before.has(stripMarks(x.text))).length;
+    if (process.env.VISION_DEBUG) console.error('reread', (density(l) / typical).toFixed(2), l.words.map((x) => x.text).join(' '), '=>', words.map((x) => x.text).join(' '));
+    if (lettersOf(words) >= lettersOf(l.words) * 1.2 && kept >= before.size * 0.6) { l.words = words; replaced++; }
+  }));
+  return replaced;
 }
 
 /** Fewer than one diacritic per four letters: the printed line has none (any marks in the answer were added by the model). */

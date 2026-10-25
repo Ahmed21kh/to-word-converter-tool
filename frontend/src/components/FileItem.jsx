@@ -3,10 +3,11 @@ import { Button, Progress, Tag } from 'antd';
 import {
   FilePdfOutlined, FileImageOutlined, FileTextOutlined, FileOutlined, DownloadOutlined, CloseOutlined,
   ReloadOutlined, FileSearchOutlined, DeleteOutlined, CheckCircleFilled, WarningFilled, EyeOutlined,
+  PauseOutlined, CaretRightOutlined,
 } from '@ant-design/icons';
 import { useI18n } from '../i18n/index.jsx';
 import { downloadUrl, getReport } from '../lib/api.js';
-import { fileKind, formatBytes } from '../lib/format.js';
+import { fileKind, formatBytes, formatClock } from '../lib/format.js';
 
 const KIND_ICON = { pdf: FilePdfOutlined, image: FileImageOutlined, text: FileTextOutlined, other: FileOutlined };
 
@@ -20,10 +21,11 @@ function useNow(active) {
   return now;
 }
 
-function FileItem({ item, onCancel, onRemove, onRetry, onReport, onPreview }) {
+function FileItem({ item, onCancel, onPause, onResume, onRemove, onRetry, onReport, onPreview }) {
   const { t } = useI18n();
   const { status, job, uploadPct } = item;
   const processing = status === 'processing';
+  const paused = status === 'paused';
   const now = useNow(processing);
   const [summary, setSummary] = useState(null);
 
@@ -46,10 +48,12 @@ function FileItem({ item, onCancel, onRemove, onRetry, onReport, onPreview }) {
     percent = uploadPct;
   } else if (status === 'queued') {
     label = job?.queuePosition > 0 ? t('converter.status.queued', { n: job.queuePosition }) : t('converter.status.analyzing');
-  } else if (processing) {
+  } else if (processing || paused) {
     const p = job?.phase || 'analyzing';
     label = t(`converter.status.${p}`, { done: job?.progress?.done ?? 0, total: job?.progress?.total ?? 0 });
+    if (paused) label = `${t('converter.status.paused')} · ${label}`;
     percent = job?.percent ?? 0;
+    if (paused) barStatus = 'normal';
   } else if (status === 'done') {
     label = t('converter.status.done');
     percent = 100;
@@ -63,12 +67,15 @@ function FileItem({ item, onCancel, onRemove, onRetry, onReport, onPreview }) {
     barStatus = 'normal';
   }
 
+  // time spent converting (pauses not counted) and the time left at the same pace
+  const elapsedMs = job && (processing || paused) ? (job.activeMs || 0) + (job.resumedAt ? Math.max(0, now - job.resumedAt) : 0) : 0;
   let eta = null;
-  if (processing && job?.startedAt && percent > 6 && percent < 99) {
-    const secs = Math.max(1, Math.round(((now - job.startedAt) / 1000) * ((100 - percent) / percent)));
+  if ((processing || paused) && elapsedMs > 0 && percent > 6 && percent < 99) {
+    const secs = Math.max(1, Math.round((elapsedMs / 1000) * ((100 - percent) / percent)));
     eta = secs < 90 ? t('converter.etaSeconds', { n: secs }) : t('converter.etaMinutes', { n: Math.ceil(secs / 60) });
   }
   const finished = ['done', 'error', 'cancelled'].includes(status);
+  const running = processing || paused;
 
   return (
     <li className={`item-in rounded-2xl border border-slate-200 bg-slate-50/70 p-3.5 transition-colors sm:p-4 dark:border-slate-700 dark:bg-slate-800/40 ${item.leaving ? 'item-out' : ''}`}>
@@ -84,7 +91,8 @@ function FileItem({ item, onCancel, onRemove, onRetry, onReport, onPreview }) {
               {status === 'done' && <CheckCircleFilled className="pop-in me-1.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />}
               {label}
             </span>
-            {eta && <span className="text-xs text-slate-500">{t('converter.eta', { t: eta })}</span>}
+            {running && elapsedMs > 0 && <span className="text-xs tabular-nums text-slate-500">{t('converter.elapsed', { t: formatClock(elapsedMs) })}</span>}
+            {eta && !paused && <span className="text-xs text-slate-500">{t('converter.eta', { t: eta })}</span>}
             {status === 'done' && summary && (
               <span className="inline-flex flex-wrap items-center gap-2 text-xs">
                 <Tag className="!m-0">{t('converter.summary.pages', { n: summary.pages ?? '—' })}</Tag>
@@ -97,7 +105,15 @@ function FileItem({ item, onCancel, onRemove, onRetry, onReport, onPreview }) {
             )}
           </div>
           {!finished || status === 'done' || status === 'error' ? (
-            <Progress className="!mb-0 !mt-1.5" percent={percent} status={barStatus} showInfo={false} size="small" aria-label={label} />
+            <Progress
+              className="!mb-0 !mt-1.5"
+              percent={percent}
+              status={barStatus}
+              showInfo={running || status === 'uploading'}
+              format={(p) => <span className="tabular-nums">{`${Number(p).toFixed(running ? 1 : 0)}%`}</span>}
+              size="small"
+              aria-label={label}
+            />
           ) : null}
         </div>
       </div>
@@ -110,6 +126,8 @@ function FileItem({ item, onCancel, onRemove, onRetry, onReport, onPreview }) {
           </>
         )}
         {status === 'error' && <Button size="small" icon={<ReloadOutlined />} onClick={() => onRetry(item.uid)}>{t('converter.actions.retry')}</Button>}
+        {(processing || status === 'queued') && job?.id && <Button size="small" icon={<PauseOutlined />} onClick={() => onPause(item.uid)}>{t('converter.actions.pause')}</Button>}
+        {paused && <Button size="small" type="primary" icon={<CaretRightOutlined className="rtl:-scale-x-100" />} onClick={() => onResume(item.uid)}>{t('converter.actions.resume')}</Button>}
         {!finished && <Button size="small" danger icon={<CloseOutlined />} onClick={() => onCancel(item.uid)}>{t('converter.actions.cancel')}</Button>}
         {finished && <Button size="small" type="text" icon={<DeleteOutlined />} onClick={() => onRemove(item.uid)} aria-label={t('converter.actions.remove')} />}
       </div>

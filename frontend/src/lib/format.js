@@ -13,6 +13,15 @@ export function formatDuration(ms) {
   return `${(s / 60).toFixed(1)} min`;
 }
 
+/** @param ms milliseconds -> "0:42" / "12:05" / "1:02:09" (a running clock) */
+export function formatClock(ms) {
+  const t = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = String(t % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
 export const fileKind = (name = '') => {
   const ext = name.split('.').pop().toLowerCase();
   if (ext === 'pdf') return 'pdf';

@@ -211,7 +211,8 @@ test('asterisks are verse brackets, a short misread quotation is repaired from i
 
 test('the Qari run plan follows the machine: slots by GPU memory, CPU without a usable GPU', async () => {
   const { runPlan } = await import('../src/services/llama-server.js');
-  assert.deepEqual(runPlan(8192, {}), { gpu: true, parallel: 4 });
+  assert.deepEqual(runPlan(8192, {}), { gpu: true, parallel: 8 });
+  assert.deepEqual(runPlan(6144, {}), { gpu: true, parallel: 4 });
   assert.deepEqual(runPlan(5000, {}), { gpu: true, parallel: 2 });
   assert.deepEqual(runPlan(4096, {}), { gpu: true, parallel: 1 });
   assert.deepEqual(runPlan(2048, {}), { gpu: false, parallel: 1 });

@@ -124,6 +124,7 @@ const en = {
       quranOff: 'Off',
       highlight: 'Highlight uncertain words',
       headings: 'Detect headings',
+      frontAsPictures: 'Cover and title pages as pictures',
       font: 'Arabic font in Word',
     },
     status: {
@@ -137,11 +138,13 @@ const en = {
       done: 'Done',
       error: 'Conversion failed',
       cancelled: 'Cancelled',
+      paused: 'Paused',
     },
+    elapsed: 'Elapsed {t}',
     eta: 'About {t} left',
     etaSeconds: '{n}s',
     etaMinutes: '{n} min',
-    actions: { download: 'Download', preview: 'Preview', report: 'Report', cancel: 'Cancel', remove: 'Remove', retry: 'Retry', clear: 'Clear list' },
+    actions: { download: 'Download', preview: 'Preview', report: 'Report', cancel: 'Cancel', remove: 'Remove', retry: 'Retry', clear: 'Clear list', pause: 'Pause', resume: 'Resume' },
     summary: { pages: '{n} pages', needReview: '{n} pages need review', allGood: 'No issues' },
     errors: {
       tooLarge: 'File is larger than the allowed limit ({size} MB)',

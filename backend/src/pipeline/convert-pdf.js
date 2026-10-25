@@ -1,6 +1,8 @@
 // Orchestrates a whole PDF: page tasks on the worker pool -> Quran guard -> docx.
-import { writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { guardParagraph } from './quran.js';
+import { fixHonorifics } from './honorifics.js';
 import { buildDocx } from './docx-builder.js';
 import { UNMAPPED } from './arabic.js';
 import { savePreview } from './preview.js';
@@ -17,6 +19,7 @@ export const DEFAULT_OPTIONS = {
   latinFont: 'Times New Roman',
   highlightUncertain: false, // doubtful words: yellow highlight + comment, only when asked
   detectHeadings: true,
+  frontAsPictures: true, // AI reading of a scanned book: the cover and title pages before its first page of text stay pictures
 };
 
 export function normalizeOptions(input = {}) {
@@ -31,7 +34,7 @@ export function normalizeOptions(input = {}) {
   const font = (v, d) => (typeof v === 'string' && /^[\p{L}\p{N} \-]{2,40}$/u.test(v) ? v : d);
   o.arabicFont = font(input.arabicFont, o.arabicFont);
   o.latinFont = font(input.latinFont, o.latinFont);
-  for (const k of ['highlightUncertain', 'detectHeadings']) {
+  for (const k of ['highlightUncertain', 'detectHeadings', 'frontAsPictures']) {
     if (input[k] !== undefined) o[k] = input[k] === true || input[k] === 'true' || input[k] === '1';
   }
   return o;
@@ -54,11 +57,16 @@ function* paragraphsOf(model) {
  * @returns summary + findings list
  */
 export function runQuranGuard(pages, mode) {
-  const summary = { found: 0, verified: 0, corrected: 0, diacriticsFixed: 0, needsReview: 0, unmatched: 0, citationWarnings: 0, items: [] };
+  const summary = { found: 0, verified: 0, corrected: 0, diacriticsFixed: 0, needsReview: 0, unmatched: 0, citationWarnings: 0, citationsFixed: 0, items: [] };
+  // the verses quoted on the last paragraphs: a book explains a passage verse by verse, so short quotations come from near them
+  let recent = [];
   for (const { model, meta } of pages) {
     if (model.method === 'image' || model.method === 'blank' || model.method === 'error') continue;
     for (const par of paragraphsOf(model)) {
-      const { findings } = mode === 'off' ? { findings: [] } : guardParagraph(par, { mode });
+      if (par.ai) fixHonorifics(par);
+      const { findings, refs = [] } = mode === 'off' ? { findings: [] } : guardParagraph(par, { mode, context: recent });
+      if (refs.length) recent = [...recent, ...refs].slice(-8);
+      for (const f of findings) if (f.citationFixed) summary.citationsFixed++;
       for (const f of findings) {
         summary.found++;
         if (f.status === 'verified') summary.verified++;
@@ -68,7 +76,7 @@ export function runQuranGuard(pages, mode) {
         else if (f.status === 'unmatched') summary.unmatched++;
         if (f.citationWarning) summary.citationWarnings++;
         if (f.lowConfidence) summary.lowConfidence = (summary.lowConfidence || 0) + 1;
-        if (f.status !== 'verified' || f.citationWarning) summary.items.push({ page: model.n, ...f });
+        if (f.status !== 'verified' || f.citationWarning || f.citationFixed) summary.items.push({ page: model.n, ...f });
       }
     }
     // what is still undecodable after the repairs is what the user has to look at
@@ -80,10 +88,26 @@ export function runQuranGuard(pages, mode) {
 }
 
 /**
- * @param ctx {jobId,file,workDir,outPath,options,pool,onProgress,isCancelled}
+ * A book opens with pages that are not running text: the cover, the half-title, the copyright and title pages, the basmala.
+ * Read as text they give scattered words; kept as pictures they look as printed (and cost no AI time). They are the pages before
+ * the first one that is a block of full lines; only the first pages of a book are looked at, cheaply (no reading).
+ * @returns {Promise<number>} how many leading pages are front matter (0 when no text page is found early on)
+ */
+async function frontMatter(pool, file, total, jobId) {
+  if (total < 12) return 0;
+  for (let n = 1; n <= Math.min(8, total); n++) {
+    const probe = await pool.run({ type: 'probe', file, n }, { jobId }).catch(() => null);
+    if (!probe) return 0;
+    if (probe.full >= 10 && probe.color < 0.05) return n - 1;
+  }
+  return 0;
+}
+
+/**
+ * @param ctx {jobId,file,workDir,outPath,options,pool,onProgress,isCancelled,waitIfPaused}
  */
 export async function convertPdf(ctx) {
-  const { jobId, file, workDir, outPath, options, pool, onProgress, isCancelled } = ctx;
+  const { jobId, file, workDir, outPath, options, pool, onProgress, isCancelled, waitIfPaused } = ctx;
   const t0 = Date.now();
   onProgress({ phase: 'analyzing', done: 0, total: 0 });
   const info = await pool.run({ type: 'info', file }, { jobId });
@@ -105,11 +129,26 @@ export async function convertPdf(ctx) {
   // count against the request timeout); a cloud API takes a few pages at once.
   const vision = options.engine === 'ai' ? visionStatus() : null;
   const lanes = Math.max(1, Math.min(total, vision?.available ? Number(process.env.AI_CONCURRENCY) || (vision.provider === 'claude' ? 4 : 2) : total));
+  // Every converted page is kept in the work folder: a paused conversion (or one cut by a server restart) goes on from the
+  // pages it has, it does not read them again.
+  const saved = path.join(workDir, 'pages');
+  await mkdir(saved, { recursive: true });
+  const loadPage = (n) => readFile(path.join(saved, `${n}.json`), 'utf8').then(JSON.parse).catch(() => null);
+  const front = vision?.available && options.frontAsPictures ? await frontMatter(pool, file, total, jobId) : 0;
   let next = 0;
   await Promise.all(Array.from({ length: lanes }, async () => {
     while (next < total) {
+      // a pause takes effect between pages: the pages being read are finished first
+      if (waitIfPaused) await waitIfPaused();
+      if (isCancelled()) throw new Error('cancelled');
+      if (next >= total) break;
       const n = ++next;
-      results[n - 1] = await runPage(n);
+      let page = await loadPage(n);
+      if (!page) {
+        page = await runPage(n, n <= front ? { asPicture: true } : {});
+        if (page.model?.method !== 'error') await writeFile(path.join(saved, `${n}.json`), JSON.stringify(page)).catch(() => {});
+      }
+      results[n - 1] = page;
       done++;
       onProgress({ phase: 'converting', done, total });
     }

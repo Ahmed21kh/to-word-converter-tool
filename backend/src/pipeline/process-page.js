@@ -9,8 +9,38 @@ import { textQuality, UNMAPPED, dominantDirection } from './arabic.js';
 import { recognize } from './ocr.js';
 import { prepareForOcr, rgbaToGray, frameBands, crop, enhanceForAi } from './scan-clean.js';
 import { visionStatus, readPageWithAi, paragraphsToBlocks } from './vision-ocr.js';
+import { segmentLines } from './text-lines.js';
 
 const OCR_DPI = 300;
+
+/**
+ * How much running text a page has, measured cheaply (100 dpi, nothing is read): its text lines, how many of them fill the
+ * width of the text block, and how much of it is in colour. A page of a book's body is black on white with many full lines; a
+ * cover is in colour (its ornaments can look like lines), a title page or the basmala has few lines.
+ */
+export async function probePage(doc, n) {
+  const page = await doc.getPage(n);
+  const { canvas } = await renderPage(page, 100, 1400);
+  const W = canvas.width;
+  const H = canvas.height;
+  const rgba = canvas.getContext('2d').getImageData(0, 0, W, H).data;
+  let colored = 0;
+  let sampled = 0;
+  for (let i = 0; i < rgba.length; i += 4 * 7) { // every 7th pixel
+    const r = rgba[i];
+    const g = rgba[i + 1];
+    const b = rgba[i + 2];
+    sampled++;
+    if (Math.max(r, g, b) - Math.min(r, g, b) > 60) colored++;
+  }
+  const gray = rgbaToGray(rgba, W, H);
+  const bands = frameBands(gray, W, H);
+  const body = bands ? crop(gray, W, H, bands.body) : { gray, width: W, height: H };
+  const boxes = segmentLines(body.gray, body.width, body.height);
+  const widest = Math.max(0, ...boxes.map((b) => b.x1 - b.x0));
+  const full = widest >= body.width * 0.5 ? boxes.filter((b) => b.x1 - b.x0 >= widest * 0.85).length : 0;
+  return { lines: boxes.length, full, color: colored / Math.max(1, sampled) };
+}
 
 /**
  * 'ar' = Arabic model only (clearly the most accurate on Arabic books: the English model makes it
@@ -81,8 +111,9 @@ export async function processPage(doc, n, opts, workDir) {
   };
 
   try {
-    // ---- exact mode: the page as a picture ------------------------------------------------
-    if (opts.mode === 'exact') {
+    // ---- exact mode, or a book's cover / title page: the page as a picture ------------------
+    if (opts.mode === 'exact' || opts.asPicture) {
+      if (opts.asPicture) meta.warnings.push('front-matter-picture');
       const pic = await pagePicture(page, workDir, n, 170, 88);
       const block = { type: 'image', ...pic, bbox: { x0: 10, y0: 10, x1: width - 10, y1: height - 10 }, fullPage: true };
       const m = finish([block], 'image');
@@ -137,7 +168,7 @@ export async function processPage(doc, n, opts, workDir) {
           const gray = rgbaToGray(canvas.getContext('2d').getImageData(0, 0, W, H).data, W, H);
           const bands = frameBands(gray, W, H);
           const body = bands ? crop(gray, W, H, bands.body) : { gray, width: W, height: H };
-          const ai = await readPageWithAi(await enhanceForAi(body.gray, body.width, body.height), { arabicOnly: opts.language === 'ar', ptPerPx: width / W, font: opts.arabicFont });
+          const ai = await readPageWithAi(await enhanceForAi(body.gray, body.width, body.height), { arabicOnly: opts.language === 'ar', ptPerPx: width / W, font: opts.arabicFont, probs: !!opts.highlightUncertain });
           if (ai.refused) meta.warnings.push('ai-declined-used-standard-ocr');
           else if (ai.noText) {
             // cover art / ornaments: keep the picture
