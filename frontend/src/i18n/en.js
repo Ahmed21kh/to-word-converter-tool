@@ -184,6 +184,7 @@ const en = {
     page: 'Page',
     chars: 'Characters',
     warnings: 'Notes',
+    note: { 'front-matter-picture': 'Cover or title page: kept as a picture', 'no-readable-text-kept-as-image': 'No readable text: kept as a picture', 'ai-failed-used-standard-ocr': 'AI reading failed, read with the standard engine', 'ai-declined-used-standard-ocr': 'The AI declined the page, read with the standard engine' },
     loading: 'Loading report…',
     failed: 'Could not load the report (it may have expired).',
     confidence: 'Confidence',

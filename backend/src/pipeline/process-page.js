@@ -39,7 +39,8 @@ export async function probePage(doc, n) {
   const boxes = segmentLines(body.gray, body.width, body.height);
   const widest = Math.max(0, ...boxes.map((b) => b.x1 - b.x0));
   const full = widest >= body.width * 0.5 ? boxes.filter((b) => b.x1 - b.x0 >= widest * 0.85).length : 0;
-  return { lines: boxes.length, full, color: colored / Math.max(1, sampled) };
+  const heights = boxes.map((b) => b.y1 - b.y0).sort((x, y) => x - y);
+  return { lines: boxes.length, full, color: colored / Math.max(1, sampled), lineH: heights.length ? heights[heights.length >> 1] : 0 };
 }
 
 /**

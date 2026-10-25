@@ -28,7 +28,8 @@ export function strongKind(s) {
   return 'neutral';
 }
 
-const SHAPED = /[\uFB50-\uFDCF\uFDF0-\uFDFF\uFE70-\uFEFFﬀ-ﬆ]/g;
+// presentation forms are turned back into letters; the ﷺ ligature (U+FDFA) stays as the book prints it
+const SHAPED = /[ﭐ-﷏ﷰ-ﷹﷻ-﷿ﹰ-﻿ﬀ-ﬆ]/g;
 
 /**
  * Convert Arabic presentation forms (\uFEE2 \uFEE0 \uFECC \uFEDF ا) and Latin ligatures back to the real

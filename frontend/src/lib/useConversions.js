@@ -10,6 +10,8 @@ let counter = 0;
  */
 export function useConversions(getOptions) {
   const [items, setItems] = useState([]);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
   const handles = useRef(new Map()); // uid -> { abort, unsubscribe }
   const waiting = useRef([]);
   const active = useRef(0);
@@ -95,13 +97,21 @@ export function useConversions(getOptions) {
     setTimeout(() => setItems((list) => list.filter((i) => i.uid !== uid)), 260);
   }, []);
 
+  // re-queue the same row in place. Side effects stay outside setItems: React (StrictMode) may run an
+  // updater twice, which used to enqueue the file twice and show duplicate rows.
   const retry = useCallback((uid) => {
-    setItems((list) => {
-      const old = list.find((i) => i.uid === uid);
-      if (old) queueMicrotask(() => add([old.file]));
-      return list.filter((i) => i.uid !== uid);
-    });
-  }, [add]);
+    const item = itemsRef.current.find((i) => i.uid === uid);
+    if (!item || !['error', 'cancelled'].includes(item.status) || waiting.current.some((i) => i.uid === uid)) return;
+    const h = handles.current.get(uid);
+    h?.unsubscribe?.();
+    if (h?.jobId) deleteJob(h.jobId);
+    handles.current.delete(uid);
+    const fresh = { ...item, options: { ...optionsRef.current() }, status: 'uploading', uploadPct: 0, job: null, error: null, errorKey: undefined };
+    itemsRef.current = itemsRef.current.map((i) => (i.uid === uid ? fresh : i)); // blocks a fast double click
+    patch(uid, fresh);
+    waiting.current.push(fresh);
+    pump();
+  }, [patch, pump]);
 
   const clearFinished = useCallback(() => {
     setItems((list) => list.map((i) => (TERMINAL.includes(i.status) ? { ...i, leaving: true } : i)));

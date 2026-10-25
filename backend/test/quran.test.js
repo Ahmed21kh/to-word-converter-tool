@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { findPassage, canonicalText, passageRef, guardParagraph } from '../src/pipeline/quran.js';
 import { UNMAPPED } from '../src/pipeline/arabic.js';
-import { fixHonorifics } from '../src/pipeline/honorifics.js';
+import { fixHonorifics, fixHeadingBrackets } from '../src/pipeline/honorifics.js';
 
 const quran = JSON.parse(readFileSync(new URL('../data/quran-uthmani.json', import.meta.url), 'utf8'));
 const verse = (s, a) => quran.find((v) => v[0] === s && v[1] === a)[2];
@@ -161,4 +161,66 @@ test('the ﷺ ligature the reader wrote as a junk word is put back; ordinary wor
   assert.equal(textOf(p), 'فَلَمّا أتى رَسُولَ الله ﷺ الحَبَرُ، ثُمَّ قالَ رَسُولُ اللهِ ﷺ: «اثْتُونِي»، وقَوْلَهُمْ لِلنّبِيِّ ﷺ: مَنْ أبُوهُ؟');
   const q = aiPar('أتى رَسُولَ الله، ولَمْ يَقُلْ شَيْئًا.');
   assert.equal(fixHonorifics(q), 0);
+});
+
+test('AI text: citations the reader damaged are set from the verse found', () => {
+  const p = aiPar('وقولُه سبحانه: (كِتَبٌ أُحْكِمَتْ اَيَنَتُهُ، ) [هود: ١]، هَذا مِن الحِكْمَةِ. نَحْو قَوْلِهِ: (مَا مَنَعَكَ أَن تَسُجُدَ لِمَا خَلَقْتُ بِيَدَيَّ) ص: هٍ]، كَما قالَ: (مِّمَا عَمِلَتْ أَيْدِينَاَ)؟ [يس: ١٨] ، وقالَ.');
+  guardParagraph(p);
+  const text = textOf(p);
+  assert.ok(text.includes(`${OPEN}${words(11, 1, 1, 4)}${CLOSE} [هود: ١]`), text);
+  assert.ok(text.includes(`${CLOSE} [ص: ٧٥]`), text);
+  assert.ok(text.includes(`${OPEN}${words(36, 71, 5, 8)}${CLOSE} [يس: ٧١]`), text);
+  const q = aiPar('ثُمَّ قالَ: وَ*(قُلْ هُوَ اللَّهُ أَحْكَمُ) [الإخوان: ١]، وَالْعَجَبُ مِنْ ضَعْفِ عُقُولِهِمْ.');
+  guardParagraph(q);
+  assert.ok(textOf(q).includes(`${OPEN}${verse(112, 1)}${CLOSE} [الإخلاص: ١]`), textOf(q));
+});
+
+test('AI text: a short quotation is found through its citation, never outside the cited surah', () => {
+  const p = aiPar('بِقَوْلِهِ عَزّ وجَلّ: *(خَلَقْنَاكِ) [الأعراف: آ ١١]، و*(أَمَرْنَاكِ) [الإسراء: آ ١]، وأشْباهِ ذَلِكَ.');
+  guardParagraph(p);
+  assert.ok(textOf(p).includes(`${OPEN}${words(7, 11, 1, 2)}${CLOSE} [الأعراف: ١١]`), textOf(p));
+  assert.ok(textOf(p).includes('*(أَمَرْنَاكِ) [الإسراء'), 'left as printed rather than put in another surah');
+  const q = aiPar('والسماوات (وَلِنَجْعَلَكَلَهُ: ءَايَةً لِّلنَّاسِ) مِمَّا [مريم: ام].');
+  guardParagraph(q);
+  assert.ok(textOf(q).includes(`${OPEN}${words(19, 21, 7, 10)}${CLOSE} [مريم: ٢١]`), textOf(q));
+});
+
+test('AI text: words the book quotes in « » or ( ) are not verses because they resemble one', () => {
+  for (const t of ['وَيَحْتَجُّونَ في قَوْلِهِمْ: (إِنَّهُ ثالِثُ ثَلاثةٍ) بِقَوْلِ الله.', 'وَيَحْتَجُّونَ في قَوْلِهِمْ: (إِنَّهُ ولَدُ اللهِ) بِأَنَّهُمْ يَقُولُونَ.', '(٢) القَعْبُ: القدح الضخم. «لِسانُ العَرَبِ» (قعب).']) {
+    const p = aiPar(t);
+    guardParagraph(p, { context: [{ surah: 3, from: 1, to: 3 }] });
+    assert.equal(textOf(p), t);
+  }
+});
+
+test('AI text: more forms of the ﷺ ligature, and headings that lost a bracket', () => {
+  const p = aiPar('يُرِيدُ: رَسُولَ اللهِ بِكُمْ. ثُمّ في مَسْجِدِ رَسُولِ الله عَليِّ يُصَلُّونَ، فقالَ رَسُولُ اللهِ وَاللهُ: «دَعْوهُمْ»، فَصَمَتَ عَنْهُما رَسُولُ اللهِ وَلَمْ يُجِبْهُما.');
+  fixHonorifics(p);
+  assert.equal(textOf(p), 'يُرِيدُ: رَسُولَ اللهِ ﷺ. ثُمّ في مَسْجِدِ رَسُولِ الله ﷺ يُصَلُّونَ، فقالَ رَسُولُ اللهِ ﷺ: «دَعْوهُمْ»، فَصَمَتَ عَنْهُما رَسُولُ اللهِ ﷺ لَمْ يُجِبْهُما.');
+  const h = aiPar('سَبَبُ إِسْلامِ كُوزِ بنِ عَلْقَمةَ]');
+  fixHeadingBrackets(h);
+  assert.equal(textOf(h), '[سَبَبُ إِسْلامِ كُوزِ بنِ عَلْقَمةَ]');
+  const d = aiPar('[[إباؤُهُم المُلاعَنةَ]]');
+  fixHeadingBrackets(d);
+  assert.equal(textOf(d), '[إباؤُهُم المُلاعَنةَ]');
+});
+
+test('the ﷺ glyph is told from a real word by reading the line twice: its junk changes, a real word does not', async () => {
+  const { markSallaLines } = await import('../src/pipeline/vision-ocr.js');
+  const line = (text) => ({ x0: 0, x1: 100, y0: 0, y1: 10, words: text.split(' ').map((t) => ({ text: t, conf: 1, alts: [] })) });
+  const second = {
+    'وَلِرَسُولِ اللهِ مَيْتٍ، فقالَ رَسُولُ اللهِ وَلِيُّهُ - كَمَا': 'وَلِرَسُولِ اللهِ وَكَمْ، فقالَ رَسُولُ اللهِ بْنُ أَبِي كَمَا',
+    'وَقَدِمَ على رَسُولِ اللهِ وَفْدُ نَصارى': 'وَقَدِمَ على رَسُولِ اللهِ وَفْدُ نَصارى',
+    'فلَمّا افْتَتَحَ رَسُولُ اللهِ مَكَّةَ خَرَجَ': 'فلَمّا افْتَتَحَ رَسُولُ اللهِ وَلِيُّ مَكَّةَ خَرَجَ',
+    'جَزاءَ تَعْرِيضِهِ بِالرَّسُولِ ]': 'جَزاءَ تَعْرِيضِهِ بِالرَّسُولِ وَ]',
+  };
+  const read = Object.keys(second).map(line);
+  const readBox = async (l) => second[l.words.map((x) => x.text).join(' ')].split(' ').map((t) => ({ text: t }));
+  await markSallaLines(read, { w: 100, readBox });
+  assert.deepEqual(read.map((l) => l.words.map((x) => x.text).join(' ')), [
+    'وَلِرَسُولِ اللهِ ﷺ، فقالَ رَسُولُ اللهِ ﷺ - كَمَا',
+    'وَقَدِمَ على رَسُولِ اللهِ وَفْدُ نَصارى',
+    'فلَمّا افْتَتَحَ رَسُولُ اللهِ ﷺ مَكَّةَ خَرَجَ',
+    'جَزاءَ تَعْرِيضِهِ بِالرَّسُولِ ﷺ ]',
+  ]);
 });

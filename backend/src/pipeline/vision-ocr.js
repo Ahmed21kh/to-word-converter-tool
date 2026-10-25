@@ -12,6 +12,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import sharp from 'sharp';
 import { dominantDirection, normalizeShaping, stripMarks } from './arabic.js';
 import { replaceRange } from './quran.js';
+import { sallaSlots, sallaLetters } from './honorifics.js';
 import { createCanvas } from '@napi-rs/canvas';
 import { segmentLines, hasRule, findFootnoteRule } from './text-lines.js';
 import { wordConfidence } from './token-confidence.js';
@@ -202,6 +203,8 @@ export async function readPageWithAi(jpeg, { arabicOnly = true, ptPerPx, font, p
   if (byLines) {
     const res = await readPageByLines(jpeg, st.model, { arabicOnly, provider: st.provider, ptPerPx, font, probs });
     if (res) return res;
+    // no text line on the page (a cover, an ornament): Qari reads lines, a whole page would not even fit its context
+    if (st.provider === 'llamacpp') return { paragraphs: [], noText: true, usage: { output_tokens: 0 }, model: st.model };
   }
   const out = st.provider === 'claude' ? await viaClaude(jpeg, st.model)
     : st.provider === 'llamacpp' ? await viaLlamaCpp(jpeg, 2000)
@@ -287,6 +290,7 @@ export async function readPageByLines(jpeg, model, { arabicOnly = true, provider
   }
   await Promise.all(Array.from({ length: Math.min(parallel, boxes.length) }, worker));
   await rereadShortLines(read, { w, readBox });
+  await markSallaLines(read, { w, readBox });
   const lines = read.filter((l) => l.words.length);
   if (!lines.length) return { paragraphs: [], noText: true, usage: { output_tokens: tokens }, model };
   // The page as it was printed: where the text block sits, how far apart its lines are, and the size that makes a line of the Word
@@ -330,6 +334,57 @@ export async function rereadShortLines(read, { w, readBox }) {
     if (lettersOf(words) >= lettersOf(l.words) * 1.2 && kept >= before.size * 0.6) { l.words = words; replaced++; }
   }));
   return replaced;
+}
+
+const SALLA = 'ﷺ';
+const letterSim = (a, b) => {
+  if (!a || !b) return 0;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return 1 - prev[b.length] / Math.max(a.length, b.length);
+};
+
+/**
+ * The reader cannot read the ﷺ ligature: it writes a junk word for it, a different one at every reading ("مَيْتٍ،", then "وَكَمْ،",
+ * then "بَكِّي،" for the same glyph), while a real word after "رسول الله" ("وَفْدُ") reads the same each time. A line with a mention of
+ * the Prophet is read again enlarged, and the word after the mention becomes ﷺ where the two readings disagree.
+ */
+export async function markSallaLines(read, { w, readBox }) {
+  let marked = 0;
+  const lines = read.filter((l) => l.words.length && sallaSlots(l.words.map((x) => x.text)).length);
+  await Promise.all(lines.slice(0, 12).map(async (l) => {
+    const again = (await readBox(l, 0, w, 1.4)).map((x) => x.text);
+    const slotsA = sallaSlots(l.words.map((x) => x.text));
+    const slotsB = sallaSlots(again);
+    if (slotsA.length !== slotsB.length) return; // the readings do not line up: nothing is changed
+    const same = (x, y, min = 0.5) => letterSim(sallaLetters(x), sallaLetters(y)) >= min;
+    for (const [n, i] of [...slotsA.entries()].reverse()) { // from the end: an insertion does not move the slots before it
+      const j = slotsB[n];
+      const a = l.words[i].text;
+      if (process.env.VISION_DEBUG) console.error('salla', a, '|', again.slice(j, j + 4).join(' '));
+      if (same(a, again[j])) continue; // read the same twice: a real word
+      // the word comes a little later in the second reading ("رَسُولُ اللهِ مَكَّةَ" / "رَسُولُ اللهِ وَلِيُّ مَكَّةَ", "… مُلْكًا،" /
+      // "… وَلِهِ قَد اسْتَلَبَهُ مُلْكًا"): a real word, and the first reading dropped the glyph (and maybe more) before it
+      if (again.slice(j + 1, j + 5).some((x) => same(a, x, 0.75))) {
+        l.words.splice(i, 0, { text: SALLA, conf: 1, alts: [] });
+        marked++;
+        continue;
+      }
+      if (!sallaLetters(a)) { // only punctuation after the name ("بِالرَّسُولِ ]"), where the second reading saw a (junk) word
+        const b = sallaLetters(again[j]);
+        if (b && b.length <= 4) { l.words.splice(i, 0, { text: SALLA, conf: 1, alts: [] }); marked++; }
+        continue;
+      }
+      if (sallaLetters(a).length > 7) continue;
+      l.words[i] ={ ...l.words[i], text: a.replace(/[\p{L}\p{M}ـ]+/u, SALLA), conf: 1, alts: [] };
+      marked++;
+    }
+  }));
+  return marked;
 }
 
 /** Fewer than one diacritic per four letters: the printed line has none (any marks in the answer were added by the model). */

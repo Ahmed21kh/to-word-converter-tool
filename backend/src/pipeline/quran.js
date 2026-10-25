@@ -54,7 +54,14 @@ function load() {
   }
   const index = new Map();
   const rindex = new Map();
+  // pairs of consecutive words: "قُلْ هُوَ" and "هُوَ ٱللَّهُ" are rare as pairs although every word in them is common
+  const bigrams = new Map();
   words.forEach((w, i) => {
+    if (i + 1 < words.length && w.key && words[i + 1].key) {
+      const k = `${w.key} ${words[i + 1].key}`;
+      if (!bigrams.has(k)) bigrams.set(k, []);
+      bigrams.get(k).push(i);
+    }
     if (!w.key) return;
     if (!index.has(w.key)) index.set(w.key, []);
     index.get(w.key).push(i);
@@ -68,7 +75,7 @@ function load() {
     const k = `${w.s}:${w.a}`;
     if (!verseStart.has(k)) verseStart.set(k, i);
   });
-  DB = { words, index, rindex, surahNames, nameKeys, verseStart };
+  DB = { words, index, rindex, bigrams, surahNames, nameKeys, verseStart };
   return DB;
 }
 
@@ -300,7 +307,7 @@ export function findPassage(text, hint = null, opts = {}) {
 }
 
 function findPassageUncached(text, hint, { rasm = false, context = null, near = null }) {
-  const { words, index, rindex, verseStart } = load();
+  const { words, index, rindex, bigrams, verseStart } = load();
   const Q = quoteWords(text);
   if (Q.length < 2) return null;
   const votes = new Map();
@@ -310,6 +317,9 @@ function findPassageUncached(text, hint, { rasm = false, context = null, near = 
     if (!rasm) return;
     const rpos = rindex.get(q.rkey);
     if (rpos && rpos.length <= 600) for (const p of rpos) votes.set(p - i, (votes.get(p - i) || 0) + 0.5 / rpos.length);
+    // AI text: a misread rare word must not hide a passage made of common words ("قُلْ هُوَ اللَّهُ أَحْكَمُ")
+    const bpos = i + 1 < Q.length ? bigrams.get(`${q.key} ${Q[i + 1].key}`) : null;
+    if (bpos && bpos.length <= 200) for (const p of bpos) votes.set(p - i, (votes.get(p - i) || 0) + 2 / bpos.length);
   });
   if (!votes.size && !context?.length) return null;
   const top = [...votes.entries()].sort((a, b) => b[1] - a[1]).slice(0, rasm ? 6 : 4);
@@ -351,6 +361,12 @@ function findPassageUncached(text, hint, { rasm = false, context = null, near = 
   if (!best || best.end <= best.start) return null;
   best.exact = best.cost === 0;
   return best;
+}
+
+/** Is this (letters, any marks) a word of the Quran, as the guard compares words? */
+export function isQuranWord(word) {
+  const key = matchKey(word);
+  return !!key && load().index.has(key);
 }
 
 export function canonicalText(start, end) {
@@ -408,9 +424,9 @@ function citationMatches(cite, ref) {
 function fuzzySurah(printed) {
   const { nameKeys } = load();
   const key = nameKey(printed.trim());
-  if (key.length < 2) return null;
-  const exact = nameKeys.indexOf(key);
+  const exact = nameKeys.indexOf(key); // also the one-letter names ص and ق
   if (exact >= 0) return exact + 1;
+  if (key.length < 2) return null;
   if (key.length < 4) return null;
   const close = nameKeys.map((k, i) => ({ i, d: k.endsWith(key) ? 0 : wordCost(key, k) * Math.max(key.length, k.length) })).filter((x) => x.d <= 1);
   return close.length === 1 ? close[0].i + 1 : null;
@@ -419,19 +435,63 @@ function fuzzySurah(printed) {
 const DIGITS = /[0-9٠-٩۰-۹]+/g;
 /**
  * A citation as the line reader prints it after a verse. Its tiny digits are often misread ("[آل عمران: ؛]", "[آل عمران: امْ"),
- * the closing bracket can be lost, and a citation broken over two lines can lose its first word ("[ عِمران: ٧٥").
- * @returns {{start:number,end:number,surah:number,range:boolean,nums:number[],raw:string}|null} offsets in `text`
+ * the closing bracket can be lost, a citation broken over two lines can lose its first word ("[ عِمران: ٧٥"), the opening bracket
+ * can come out reversed ("]آل عمران: ]") or not at all ("ص: ه]"), and the name misread ("[الإخوان: ١]": surah null, name kept).
+ * @returns {{start:number,end:number,surah:number|null,name:string,range:boolean,nums:number[],raw:string}|null} offsets in `text`
  */
 function looseCitation(text, at) {
   const rest = text.slice(at, at + 70);
   const lead = /^\s*/.exec(rest)[0].length;
-  const m = /^\[\s*(?:سورة\s+)?([ء-يٱً-ْٰ ]{2,24}?)\s*[:：]\s*(?:([^[\]،,]{0,10}?)\s*\]|([^[\]\s،,]{1,6}(?:\s*[-–]\s*[^[\]\s،,]{1,4})?))/.exec(rest.slice(lead));
+  const s = rest.slice(lead);
+  const NAME = '(?:سورة\\s+)?([ء-يٱ\\u064B-\\u0652\\u0670 ]{1,24}?)\\s*[:：]\\s*'; // one letter: ص, ق
+  const m = new RegExp(`^[[\\]]\\s*${NAME}(?:([^[\\]،,]{0,10}?)\\s*\\]|([^[\\]\\s،,]{1,6}(?:\\s*[-–]\\s*[^[\\]\\s،,]{1,4})?))`).exec(s)
+    || new RegExp(`^${NAME}([^[\\]،,\\s]{0,6}(?:\\s*[-–]\\s*[^[\\]\\s،,]{1,4})?)\\s*\\]`).exec(s); // no opening bracket: needs the closing one
   if (!m) return null;
-  const surah = fuzzySurah(m[1]);
-  if (!surah) return null;
+  const name = m[1].trim();
+  const surah = fuzzySurah(name);
+  if (!surah && stripMarks(name).replace(/\s/g, '').length < 2) return null;
   const numText = m[2] ?? m[3] ?? '';
   const nums = (numText.match(DIGITS) || []).map((d) => Number(toWesternDigits(d)));
-  return { start: at + lead, end: at + lead + m[0].length, surah, range: /[-–]/.test(numText), nums, raw: m[0] };
+  return { start: at + lead, end: at + lead + m[0].length, surah, name, range: /[-–]/.test(numText), nums, numText, raw: m[0] };
+}
+
+/** The citation after a verse's closing bracket, past a "؟" or another stray bracket the reader printed there. */
+function citationAfter(text, at) {
+  return looseCitation(text, at + /^[\s؟*)）»'"”’]*/.exec(text.slice(at))[0].length);
+}
+
+/** How alike a misread surah name is to the surah's real name (0..1). */
+const nameSim = (printed, real) => 1 - wordCost(nameKey(printed), nameKey(real));
+
+/** Word ranges of the verses a citation names (its numbers), or of its whole surah. */
+function citedWindows(cite, byNumbers) {
+  const { words, verseStart } = load();
+  const surahEnd = verseStart.get(`${cite.surah + 1}:1`) ?? words.length;
+  if (!byNumbers) {
+    const lo = verseStart.get(`${cite.surah}:1`);
+    return lo === undefined ? [] : [[lo, surahEnd]];
+  }
+  const out = [];
+  const [a, b = a] = cite.nums;
+  for (let v = a; v <= Math.min(b, a + 30); v++) {
+    const lo = verseStart.get(`${cite.surah}:${v}`);
+    if (lo !== undefined) out.push([lo, verseStart.get(`${cite.surah}:${v + 1}`) ?? surahEnd]);
+  }
+  return out;
+}
+
+/**
+ * A one- or two-word quotation followed by its citation ("*(خَلَقْنَاكُمْ) [الأعراف: ١١]"): looked for in the cited verse, then in
+ * the whole surah, where it must be clearly the only good place.
+ */
+function findCited(text, cite) {
+  if (!cite?.surah) return null;
+  if (cite.nums.length) {
+    const h = findNearby(text, citedWindows(cite, true));
+    if (h && h.sim >= 0.8) return { ...h, anchored: true };
+  }
+  const h = findNearby(text, citedWindows(cite, false));
+  return h && h.sim >= 0.9 && h.runnerUp < h.sim - 0.15 ? { ...h, anchored: true } : null;
 }
 
 // ---- applying to runs --------------------------------------------------------------------------
@@ -679,18 +739,19 @@ function bracketPlainQuranSpans(par) {
 // delimiters around it become the ornate brackets. Text the book explains in its own words stays prose: without brackets around it a
 // stretch must match almost exactly.
 // a dash between spaces sets off the author's words inside a quotation ("﴿ذَلِكَ نَتْلُوهُ عَلَيْكَ - يا مُحَمَّدُ - مِنَ الآيَاتِ﴾"): they stay prose
-const CHUNK_BREAK = /[()（）«»﴿﴾*[\]،,:؛.!]|(?:^|\s)؟|\s[-–]\s/;
+const CHUNK_BREAK = /[()（）«»﴿﴾*[\]،,:؛.!'"“”‘’]|(?:^|\s)؟|\s[-–]\s/;
 const ASIDE = /^\s[-–]\s[^-–()﴿﴾[\]]{2,60}?\s[-–]\s$/;
 const ASIDE_IN = /\s[-–]\s[^-–()﴿﴾[\]]{2,60}?\s[-–]\s/g;
 const VOCATIVE = /(?<=^|\s)ي\p{M}*ا\p{M}*\s+[\p{L}\p{M}]+/gu; // "يا مُحَمَّدُ" said to the reader inside a quotation, often without dashes
-const HARD_OPEN = /[(（﴿]/;
-const HARD_CLOSE = /[)）»﴾]/;
-// a misread bracket or the verse separator ("(*)" too); a question mark only when it stands alone ("رَحِيمٌ ؟ قُلْ"), not after a
-// word ("وَبَيِّنَةٌ؟"). « » are the quotation marks of a hadith, never of a verse.
-const OPENS = /(?:[(（﴿*][)）(（﴿*]*|(?:^|\s)؟)\s*$/;
-const CLOSES = /^[\s\p{M}ء]*(?:[)）»﴾*]|؟(?=\s|$))/u;
+const HARD_OPEN = /[(（﴿'"“‘]/;
+const HARD_CLOSE = /[)）»﴾'"”’]|\s:|:\s/; // a colon with a space is crossed only when the verse clearly goes on
+// a misread bracket or the verse separator ("(*)" too), quote marks (''تَجْرِي بِأَعْيُنِنَا''); a question mark only when it stands
+// alone ("رَحِيمٌ ؟ قُلْ"), not after a word ("وَبَيِّنَةٌ؟"). « » are the quotation marks of a hadith, never of a verse. A comma
+// or colon the reader put before a closing bracket does not hide it ("ءَايَٰتُهُۥ، )").
+const OPENS = /(?:[(（﴿*'"“‘][)）(（﴿*'"“”‘’]*|(?:^|\s)؟)\s*$/;
+const CLOSES = /^[\s\p{M}ء]*(?:[)）»﴾*'"”’]|؟(?=\s|$))|^[\s\p{M}ء]*[،,.:؛]\s*[)）»﴾'"”’]/u; // "، ؟" / "، *" may open the next verse
 // what may stand inside one verse: separator, misread brackets, a colon the reader put between two words ("لَهُ:كُنْ")
-const SOFT_BREAK = /^(?:(?:[\s()（）»﴿﴾*\p{M}ء]|(?:^|\s)؟(?=\s|$))*|:)$/u;
+const SOFT_BREAK = /^(?:(?:[\s()（）»﴿﴾*'"“”‘’\p{M}ء]|(?:^|\s)؟(?=\s|$))*|\s*:\s*)$/u;
 // what the reader makes of a closing bracket: "كِ" and "ء" are not words; "كِمْ", "كِمِّا" are taken only where a sentence ends
 const plainLetters = (w) => stripMarks(w).replace(/ـ/g, '');
 const isStrayLetter = (w) => /^(?:ك|ء+)$/.test(plainLetters(w));
@@ -748,11 +809,16 @@ function markAiVerses(par, context) {
     const end = i + 1 === toks.length || CHUNK_BREAK.test(gap(i)) || !isFree(toks[i]) || !isFree(toks[i + 1]);
     if (end) { if (toks.slice(a, i + 1).every(isFree)) chunks.push([a, i + 1]); a = i + 1; }
   }
-  const citeAfter = (k) => {
+  // the citation right after a stretch: past the misread closing bracket, and past one short word the reader made of it
+  // ("لِّلنَّاسِ) مِمَّا [مريم: ٢١]")
+  const citeAt = (k) => {
     let at = toks[k - 1].end;
     if (k < toks.length && isJunkWord(toks[k].w) && SOFT_BREAK.test(gap(k - 1))) at = toks[k].end;
-    return looseCitation(text, at + /^[\s)）»﴾*؟\]0-9٠-٩\p{M}ء]*/u.exec(text.slice(at))[0].length);
+    at += /^[\s)）»﴾*؟0-9٠-٩\p{M}ء،,.:؛'"”’]*/u.exec(text.slice(at))[0].length;
+    const junk = /^[\p{L}\p{M}]{1,10}\s*(?=[[\]])/u.exec(text.slice(at));
+    return junk && plainLetters(junk[0].trim()).length <= 4 && looseCitation(text, at + junk[0].length) ? at + junk[0].length : at;
   };
+  const citeAfter = (k) => looseCitation(text, citeAt(k)) || looseCitation(text, citeAt(k) + (/^\]\s*/.exec(text.slice(citeAt(k)))?.[0].length || 0));
   const opened = (k) => OPENS.test(gap(k - 1));
   // "»" closes a hadith when a "«" was opened before it
   const hadithClose = (k) => /^[\s\p{M}]*»/u.test(gap(k - 1)) && text.lastIndexOf('«', toks[k - 1].start) > text.lastIndexOf('»', toks[k - 1].start);
@@ -760,11 +826,12 @@ function markAiVerses(par, context) {
   const closed = (k) => (CLOSES.test(gap(k - 1)) && !hadithClose(k)) || (k < toks.length ? isJunkWord(toks[k].w) : !/[.،,؛:!؟»]/.test(gap(k - 1)));
 
   const pieces = [];
-  const tryChunk = ([k0, k1], windows, shortOnly) => {
+  const tryChunk = ([k0, k1], windows, shortOnly, group = false) => {
+    while (k1 - k0 > 1 && isJunkWord(toks[k1 - 1].w)) k1--; // "… أُنثَىٰ كِمِّ [آل عمران": the junk word is the closing bracket
     const cite = citeAfter(k1);
-    const enclosed = opened(k0) && (closed(k1) || !!cite);
-    const half = opened(k0) || closed(k1) || !!cite;
-    const hint = cite ? { surah: cite.surah, from: 1, to: 999 } : null;
+    const enclosed = group || (opened(k0) && (closed(k1) || !!cite));
+    const half = enclosed || opened(k0) || closed(k1) || !!cite;
+    const hint = cite?.surah ? { surah: cite.surah, from: 1, to: 999 } : null;
     let x = k0;
     let y = k1;
     // no bracket on either side: the book's own words, unless a long stretch is the Mushaf almost word for word (a reader that
@@ -796,25 +863,53 @@ function markAiVerses(par, context) {
         const atOpen = !opened(k0) || x - k0 <= (enclosed ? 1 : 0);
         const atClose = !(closed(k1) || cite) || k1 - y <= (enclosed ? 1 : 0);
         const strong = hit.sim >= 0.9 && ev.n >= MIN_EXACT_WORDS && ev.sum >= MIN_EVIDENCE;
-        const ok = enclosed ? hit.sim >= 0.6 && (n >= 3 || hit.sim >= 0.75) && atOpen && atClose
-          : half ? n >= 3 && atOpen && atClose
-            && ((hit.local && ((hit.sim >= 0.9 && n >= 4) || (hit.sim >= 0.72 && ev.n >= 2 && ev.sum >= 10))) || (cite && hit.sim >= 0.85))
+        // two words fit many places: far from the verses the page explains they must be almost exact and cited (a footnote's
+        // «لسان العرب» is not ﴿لِسَانٌ عَرَبِيٌّ﴾); a whole ( ) group the reader broke up with a colon must match well
+        // ... unless they are the Mushaf exactly and one of them is rare there ("﴿كُن فَيَكُونُ﴾"; not "(قال الله)")
+        const rare = join(x, y).split(' ').some((w) => { const k = matchKey(w); return k.length >= 3 && (load().index.get(k)?.length || 999) <= 30; });
+        // (the whole bracket: "(إنّه ثالِثُ ثَلاثةٍ)" is the book quoting the Christians, not ﴿ثَالِثُ ثَلَٰثَةٖۘ﴾)
+        const two = n < 3 && !hit.local ? !par.footnote && ((cite?.surah && hit.anchored && hit.sim >= 0.88) || (hit.sim >= 0.95 && rare && x === k0 && y === k1)) : true;
+        // a few words in brackets must be close to the Mushaf ("(إنّه ولدُ الله)" is not ﴿إِنِّي عَبۡدُ ٱللَّهِ﴾); a long quotation may be
+        // badly read and is still unmistakable
+        const floor = n >= 5 ? (group ? 0.75 : 0.6) : hit.local ? 0.7 : 0.8;
+        const ok = enclosed ? hit.sim >= floor && (n >= 3 || hit.sim >= 0.75) && two && atOpen && atClose
+          : half ? atOpen && atClose && ((n >= 3
+            && ((hit.local && ((hit.sim >= 0.9 && n >= 4) || (hit.sim >= 0.72 && ev.n >= 2 && ev.sum >= 10))) || (cite && hit.sim >= 0.85)))
+            || (n === 2 && cite?.surah && hit.anchored && hit.sim >= 0.88))
             : strong && (n >= 8 || (hit.local && n >= 5));
         if (ok) { pieces.push({ x, y, hit }); return true; }
       }
     }
+    // a short quotation with its citation: in the cited verse (or, unambiguously, the cited surah)
+    if ((enclosed || closed(k1)) && k1 - k0 <= 2 && cite?.surah) {
+      const hit = findCited(join(k0, k1), cite);
+      if (hit && matchKey(join(k0, k1)).length >= 3) { pieces.push({ x: k0, y: k1, hit }); return true; }
+    }
     // a short quotation (one or two words) between brackets: only next to the verses the text is explaining
     if (enclosed && k1 - k0 <= 2 && windows.length) {
+      // among equal places, the one next to the verse quoted right before or after it ("(الٓمٓ) ٱللَّهُ لَآ إِلَٰهَ ..." is 3:1)
+      const before = pieces.filter((pc) => pc.y <= k0).at(-1);
+      const after = pieces.filter((pc) => pc.x >= k1).sort((u, v) => u.x - v.x)[0];
+      const near = after && (!before || after.x - k1 < k0 - before.y) ? after.hit.start - (k1 - k0) : before ? before.hit.end : opts(windows).near;
       for (const [p, q] of k1 - k0 === 2 ? [[k0, k1], [k0, k0 + 1]] : [[k0, k1]]) {
-        const hit = findNearby(join(p, q), windows, opts(windows).near);
+        const hit = findNearby(join(p, q), windows, near);
         const letters = matchKey(join(p, q)).length;
-        if (hit && (letters >= 3 || (letters === 2 && hit.exact)) && hit.sim >= (q - p === 1 ? 0.8 : 0.75)) { pieces.push({ x: p, y: q, hit }); return true; }
+        const inCited = !cite?.surah || load().words[hit?.start]?.s === cite.surah; // a citation names the surah it comes from
+        if (hit && inCited && (letters >= 3 || (letters === 2 && hit.exact)) && hit.sim >= (q - p === 1 ? 0.8 : 0.75)) { pieces.push({ x: p, y: q, hit }); return true; }
       }
     }
     return false;
   };
   const windows0 = contextWindows(context);
-  const rest = chunks.filter((c) => !tryChunk(c, windows0, false));
+  // a ( ) group the reader broke up with a colon, a comma or "؟" inside ("(وَلِنَجْعَلَكَلَهُ: ءَايَةً لِّلنَّاسِ)") is also tried whole
+  const groups = [];
+  for (const g of text.matchAll(/[(（]([^()（）[\]«»\n]{3,300}?)[)）]/g)) {
+    const inside = toks.map((t, i) => [t, i]).filter(([t]) => t.start > g.index && t.end < g.index + g[0].length).map(([, i]) => i);
+    if (inside.length >= 2 && /[:،,؟*.]/.test(g[1])) groups.push([inside[0], inside.at(-1) + 1]);
+  }
+  for (const g of groups) if (toks.slice(g[0], g[1]).every(isFree)) tryChunk(g, windows0, false, true);
+  const inPiece = ([c0, c1]) => pieces.some((p) => c0 < p.y && c1 > p.x);
+  const rest = chunks.filter((c) => !inPiece(c) && !tryChunk(c, windows0, false));
   // the verses found on this paragraph also show where its short quotations come from
   const windows1 = contextWindows([...(context || []), ...pieces.map((p) => passageRef(p.hit.start, p.hit.end))]);
   if (windows1.length) for (const c of rest) tryChunk(c, windows1, true);
@@ -824,7 +919,9 @@ function markAiVerses(par, context) {
   // two words must continue it, and one unreadable word may be passed over when the next one fits well
   const fits = (k, at, dir) => { // Mushaf words token k stands for when it continues the verse at `at` (dir +1 right, -1 left)
     const parts = dir > 0 ? toks[k].parts : [...toks[k].parts].reverse();
-    return parts.every((w, i) => wordSimR(w, at + dir * i) >= 0.6) ? parts.length : 0;
+    // the one word right before a closing bracket may be read worse ("أَحْكَمُ)" for ﴿أَحَدٌ﴾): the bracket confirms it
+    const min = dir > 0 && parts.length === 1 && /^\s*[)）»﴾'"”’]/.test(gap(k)) ? 0.3 : 0.6;
+    return parts.every((w, i) => wordSimR(w, at + dir * i) >= min) ? parts.length : 0;
   };
   const owned = (k) => pieces.some((q) => k >= q.x && k < q.y);
   for (const p of pieces) {
@@ -877,16 +974,25 @@ function markAiVerses(par, context) {
     let s = toks[p.x].start;
     let e = toks[p.y - 1].end;
     const before = text.slice(p.x ? toks[p.x - 1].end : 0, s);
-    const open = /(?:[(（﴿*]|(?:^|\s)؟)[\s()（）﴿*؟]*$/.exec(before);
+    const open = /(?:[(（﴿*'"“‘]|(?:^|\s)؟)[\s()（）﴿*؟'"“”‘’]*$/.exec(before);
     if (open) s -= open[0].trimStart().length;
     const junk = p.y < toks.length && SOFT_BREAK.test(gap(p.y - 1))
       && (isStrayLetter(toks[p.y].w) || (isJunkWord(toks[p.y].w) && /^[\s)）»﴾*؟\]\p{M}ء]*(?:[،,.:؛[]|$)/u.test(text.slice(toks[p.y].end))));
     if (junk) e = toks[p.y].end;
-    const close = /^(?:[\s)）»﴾*؟\p{M}ء]*[)）»﴾*]|\s+؟(?=\s|$)|\s*\](?=\s*\[))(?:[\p{M}ء]+(?=[\s،,.:؛]|$))?/u.exec(text.slice(e));
+    // a comma before the bracket is taken only with a real closing bracket, never with "*" (which may open the next verse)
+    const close = /^(?:[\s)）»﴾*؟\p{M}ء'"”’]*[)）»﴾*'"”’]|\s*[،,:؛]\s*[)）»﴾'"”’]|\s+؟(?=\s|$)|\s*\](?=\s*\[))(?:[\p{M}ء]+(?=[\s،,.:؛]|$))?/u.exec(text.slice(e));
     if (close) e += close[0].length;
+    const ask = /^\s*؟(?=\s*[[\]])/.exec(text.slice(e)); // "أَيْدِينَا؟ [يس: ٧١]"
+    if (ask) e += ask[0].length;
+    // a short word the reader made of the bracket, right before the citation ("لِّلنَّاسِ) مِمَّا [مريم: ام]")
+    const stray = /^\s*[\p{L}\p{M}]{1,10}(?=\s*[[\]])/u.exec(text.slice(e));
+    if (stray && plainLetters(stray[0].trim()).length <= 4 && looseCitation(text, e + stray[0].length)) e += stray[0].length;
     // "ٱلۡأُمِّيِّـۧنَ)ِ", "عَلَيْكُمْ ِ َءِ،", "اللَّهَ)١ [آل عمران": marks and digits the reader made of the bracket
-    const tail = /^(?:\s*[\p{M}ء]+)+(?=\s*[،,.:؛]|\s*$)|^[\p{M}ء]+(?=\s)|^[0-9٠-٩]{1,2}(?=\s*\[)/u.exec(text.slice(e));
+    const tail = /^(?:\s*[\p{M}ء]+)+(?=\s*[،,.:؛]|\s*$)|^[\p{M}ء]+(?=\s)|^[0-9٠-٩]{1,2}(?=\s*\[)|^\s*:\s*\*(?=\s*:)/u.exec(text.slice(e)); // also "﴾:*:"
     if (tail) e += tail[0].length;
+    // what one verse took as its closing bracket is never also the next one's opening bracket
+    const prev = jobs.at(-1);
+    if (prev && prev.e > s) s = Math.min(prev.e, toks[p.x].start);
     jobs.push({ s, e, inner: text.slice(toks[p.x].start, toks[p.y - 1].end) });
   }
   for (const j of jobs.reverse()) replaceRange(par.runs, j.s, j.e, ORNATE_OPEN + j.inner + ORNATE_CLOSE);
@@ -974,12 +1080,18 @@ export function guardParagraph(par, { mode = 'correct', minSim = 0.78, context =
     const inner = text.slice(sp.start, sp.end);
     if (sp.aside) { items.push({ sp, inner }); continue; }
     const cite = sp.plain || sp.part ? null : parseCitation(text.slice(sp.bracketEnd, sp.bracketEnd + 60));
-    const loose = ai && !sp.plain && !sp.part ? looseCitation(text, sp.bracketEnd) : null;
+    const loose = ai && !sp.plain && !sp.part ? citationAfter(text, sp.bracketEnd) : null;
     // the digits an AI reader prints are not trusted to anchor the search, only the surah name
-    const hint = ai ? (loose ? { surah: loose.surah, from: 1, to: 999 } : null) : cite && cite.surah ? { surah: cite.surah, from: cite.from, to: cite.to } : null;
+    const hint = ai ? (loose?.surah ? { surah: loose.surah, from: 1, to: 999 } : null) : cite && cite.surah ? { surah: cite.surah, from: cite.from, to: cite.to } : null;
     const near = items.findLast((x) => x.hit)?.hit.end ?? refEnd((context || []).at(-1));
     const words = ai ? inner.split(/\s+/).flatMap(splitMerged).join(' ') : inner;
-    const hit = findPassage(words, hint, ai ? { rasm: true, context: windows, near } : undefined) || (ai ? findNearby(words, windows, near) : null);
+    let hit = findPassage(words, hint, ai ? { rasm: true, context: windows, near } : undefined) || (ai ? findNearby(words, windows, near) : null);
+    // one or two words followed by their citation: the cited verse knows them better than the whole Quran
+    if (ai && loose?.surah && words.split(' ').length <= 2) {
+      const cited = findCited(words, loose);
+      if (cited && !(hit?.local && hit.sim >= cited.sim)) hit = cited;
+      else if (hit && load().words[hit.start].s !== loose.surah) hit = null; // the citation names another surah: not this place
+    }
     const item = { sp, inner, cite, loose, hit };
     if (hit) {
       const ref = passageRef(hit.start, hit.end);
@@ -1023,12 +1135,18 @@ export function guardParagraph(par, { mode = 'correct', minSim = 0.78, context =
     const sure = hit.exact || hit.sim >= 0.8;
     const unambiguous = hit.local || hit.anchored || (hit.runnerUp || 0) < hit.sim - 0.1;
     if (ai && loose && mode === 'correct') {
-      const nums = loose.surah === ref.surah && sure && unambiguous ? citationNumbers(loose, ref, since) : null;
+      // a misread surah name ("[الإخوان: ١]" after ﴿قُلۡ هُوَ ٱللَّهُ أَحَدٌ﴾) is put right when it is close to the verse's surah
+      const misnamed = !loose.surah && nameSim(loose.name, ref.name) >= 0.5;
+      const sameSurah = loose.surah === ref.surah || misnamed;
+      const printed = () => (loose.nums.length ? loose.nums.slice(0, 2).map(toIndic).join('-') : null);
+      // right numbers but a stray letter among them ("[الأعراف: آ ١١]") or marks in the name ("[الْنحل: ٢٢]"): written cleanly
+      const untidy = misnamed || /[^\s0-9٠-٩۰-۹\-–]/.test(loose.numText) || loose.name.replace(/\s+/g, ' ') !== ref.name || !/\]\s*$/.test(loose.raw);
+      const nums = sameSurah && sure && unambiguous ? citationNumbers(loose, ref, since) || (untidy ? printed() : null) : null;
       if (nums) {
         const fixed = `[${ref.name}: ${nums}]`;
         replaceRange(par.runs, loose.start, loose.end, fixed);
         finding.citationFixed = `${loose.raw.trim()} → ${fixed}`;
-      } else if (loose.surah !== ref.surah || (!sure && loose.nums.length && !(loose.nums[0] <= ref.to && (loose.nums[1] ?? loose.nums[0]) >= ref.from))) {
+      } else if (!sameSurah || (!sure && loose.nums.length && !(loose.nums[0] <= ref.to && (loose.nums[1] ?? loose.nums[0]) >= ref.from))) {
         finding.citationWarning = `Citation "${loose.raw.trim()}" does not match the verse found (${ref.label})`;
       }
     } else if (!cite && !sp.plain && mode === 'correct' && par.ai && (hit.exact || hit.sim >= 0.9)) fixMissingCitation(par, text, sp.bracketEnd, ref);

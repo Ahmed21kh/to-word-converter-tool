@@ -91,7 +91,10 @@ The line reader cannot print the ornate brackets: it writes ﴿ ﴾ as `( )`, `*
   place for a phrase the Quran repeats;
 * sets the citation numbers from the verse found when the match is certain (`[آل عمران: ١١-١٢]` → `[آل عمران: ٢١-٢٦]`; a range
   starts at the first verse quoted since the previous citation); every change is listed in the report;
-* puts back the ﷺ ligature the reader writes as a junk word after "رسول الله" / "النبي".
+* puts back the ﷺ ligature. The reader cannot read it and writes a different junk word for it at every reading ("مَيْتٍ،", then
+  "وَكَمْ،"), while a real word after "رسول الله" reads the same twice: a line that mentions the Prophet is read again enlarged and
+  the word after the mention becomes ﷺ where the readings disagree (or ﷺ goes before it when the second reading shows the
+  first one dropped the glyph). The ligature is kept as one character (U+FDFA), not spelled out.
 
 Measured on 11 pages of *al-Rawd al-Unuf* (vol. 5): 86 quotations, all matched to the Mushaf, 16 misread citation numbers set right,
 5 ﷺ restored; 64 s for the 11 pages on an 8 GB GPU. A text line that comes out much shorter than its ink is read again enlarged
@@ -109,7 +112,7 @@ Native Tesseract 5.4 with the larger "best" Arabic model was also measured on th
 
 * 650-page Arabic PDF (a different Quran verse on every page): converted in **~7.5 s** with 3 workers; **649 of 650 verses came out
   identical to the Mushaf text** and the last one was flagged for review in the report; peak server memory ≈ 0.8 GB.
-* Unit + pipeline + AI-plumbing tests: 51 passing (`npm test`).
+* Unit + pipeline + AI-plumbing tests: 56 passing (`npm test`).
 * Browser flow in Edge (upload → progress → preview → download, side menu, dark/light) with zero console errors.
 * Downloads support `HEAD` and `Range` (resume, download managers).
 

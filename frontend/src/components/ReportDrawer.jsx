@@ -2,21 +2,21 @@ import { useEffect, useState } from 'react';
 import { Alert, Drawer, Spin, Table, Tag } from 'antd';
 import { useI18n } from '../i18n/index.jsx';
 import { getReport } from '../lib/api.js';
-import { formatBytes, formatDuration } from '../lib/format.js';
+import { formatBytes } from '../lib/format.js';
 
 const STATUS_COLOR = { corrected: 'blue', 'diacritics-fixed': 'cyan', unmatched: 'red', 'needs-review': 'orange', verified: 'green' };
 
 function Stat({ label, value, tone }) {
   return (
-    <div className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
-      <div className="text-xs text-slate-500 dark:text-slate-400">{label}</div>
-      <div className={`text-xl font-extrabold ${tone || ''}`}>{value}</div>
+    <div className="min-w-0 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+      <div className="truncate text-xs text-slate-500 dark:text-slate-400">{label}</div>
+      <div dir="auto" className={`truncate text-xl font-extrabold ${tone || ''}`}>{value}</div>
     </div>
   );
 }
 
 export default function ReportDrawer({ jobId, name, onClose }) {
-  const { t, dir } = useI18n();
+  const { t, raw, dir } = useI18n();
   const [report, setReport] = useState(null);
   const [failed, setFailed] = useState(false);
 
@@ -28,6 +28,8 @@ export default function ReportDrawer({ jobId, name, onClose }) {
 
   const q = report?.quran;
   const drawerWidth = typeof window === 'undefined' ? 760 : Math.min(760, window.innerWidth);
+  // conversion time in the page's language: "45 ث" / "2.0 د"
+  const duration = (ms) => (ms < 60_000 ? t('converter.etaSeconds', { n: Math.max(1, Math.round(ms / 1000)) }) : t('converter.etaMinutes', { n: (ms / 60_000).toFixed(1) }));
 
   return (
     <Drawer
@@ -42,12 +44,12 @@ export default function ReportDrawer({ jobId, name, onClose }) {
       {!report && !failed && <div className="py-20 text-center"><Spin /> <div className="mt-3 text-slate-500">{t('report.loading')}</div></div>}
       {failed && <Alert type="error" showIcon title={t('report.failed')} />}
       {report && (
-        <div className="grid gap-7">
+        <div className="grid min-w-0 gap-7 *:min-w-0">
           <section>
             <h3 className="mb-3 text-lg font-bold">{t('report.summary')}</h3>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <Stat label={t('report.pages')} value={report.pages ?? '—'} />
-              <Stat label={t('report.time')} value={formatDuration(report.durationMs)} />
+              <Stat label={t('report.time')} value={duration(report.durationMs)} />
               <Stat label={t('report.size')} value={formatBytes(report.outputBytes)} />
               <Stat label={t('report.reviewPages')} value={report.reviewPages.length} tone={report.reviewPages.length ? 'text-amber-600' : 'text-emerald-600'} />
             </div>
@@ -78,9 +80,9 @@ export default function ReportDrawer({ jobId, name, onClose }) {
                   <Stat label={t('report.quranUnmatched')} value={q.unmatched} tone={q.unmatched ? 'text-red-600' : ''} />
                   <Stat label={t('report.quranCitation')} value={q.citationWarnings} tone={q.citationWarnings ? 'text-amber-600' : ''} />
                 </div>
-                <ul className="m-0 mt-4 grid max-h-[420px] list-none gap-3 overflow-auto p-0">
+                <ul className="m-0 mt-4 grid max-h-[420px] list-none gap-3 overflow-y-auto overflow-x-hidden p-0">
                   {q.items.slice(0, 200).map((it, i) => (
-                    <li key={i} className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+                    <li key={i} className="min-w-0 wrap-break-word rounded-xl border border-slate-200 p-3 dark:border-slate-700">
                       <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
                         <Tag color={STATUS_COLOR[it.status]} className="!m-0">{t(`report.status.${it.status}`)}</Tag>
                         <span className="font-semibold">{t('report.page')} {it.page}</span>
@@ -123,13 +125,14 @@ export default function ReportDrawer({ jobId, name, onClose }) {
                 rowKey="n"
                 dataSource={report.pageDetails}
                 pagination={{ pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }}
-                scroll={{ x: 'max-content' }}
+                tableLayout="fixed"
                 columns={[
-                  { title: t('report.page'), dataIndex: 'n', width: 80 },
-                  { title: '', dataIndex: 'method', render: (m) => <Tag className="!m-0">{t(`report.method.${m}`)}</Tag> },
-                  { title: t('report.chars'), dataIndex: 'chars' },
-                  { title: t('report.confidence'), render: (_, r) => (r.confidence != null ? `${r.confidence}%` : r.quality != null ? `${Math.round(r.quality * 100)}%` : '—') },
-                  { title: t('report.warnings'), render: (_, r) => (r.warnings || []).map((w) => <Tag key={w} color="warning">{w}</Tag>) },
+                  { title: t('report.page'), dataIndex: 'n', width: 64 },
+                  { title: '', dataIndex: 'method', width: '28%', render: (m) => <Tag className="!m-0 max-w-full !whitespace-normal">{t(`report.method.${m}`)}</Tag> },
+                  { title: t('report.chars'), dataIndex: 'chars', width: 64 },
+                  { title: t('report.confidence'), width: 64, render: (_, r) => (r.confidence != null ? `${r.confidence}%` : r.quality != null ? `${Math.round(r.quality * 100)}%` : '—') },
+                  // long notes wrap inside their cell: the drawer never scrolls sideways
+                  { title: t('report.warnings'), render: (_, r) => <div className="flex flex-wrap gap-1">{(r.warnings || []).map((w) => <Tag key={w} title={w} color={raw(`report.note.${w.split(':')[0]}`) && w.startsWith('front') ? 'default' : 'warning'} className="!m-0 max-w-full !whitespace-normal break-all">{raw(`report.note.${w.split(':')[0]}`) || w}</Tag>)}</div> },
                 ]}
               />
             </section>

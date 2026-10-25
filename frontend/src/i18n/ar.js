@@ -184,6 +184,7 @@ const ar = {
     page: 'الصفحة',
     chars: 'الحروف',
     warnings: 'ملاحظات',
+    note: { 'front-matter-picture': 'غلاف أو صفحة عنوان: حُفظت كصورة', 'no-readable-text-kept-as-image': 'لا نص مقروء: حُفظت كصورة', 'ai-failed-used-standard-ocr': 'تعذّرت القراءة بالذكاء الاصطناعي، قُرئت بالمحرك العادي', 'ai-declined-used-standard-ocr': 'رفض الذكاء الاصطناعي الصفحة، قُرئت بالمحرك العادي' },
     loading: 'جار\u064D تحميل التقرير…',
     failed: 'تعذ\u0651ر تحميل التقرير (ربما انتهت صلاحيته).',
     confidence: 'الثقة',

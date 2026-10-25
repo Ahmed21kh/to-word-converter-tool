@@ -2,7 +2,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { guardParagraph } from './quran.js';
-import { fixHonorifics } from './honorifics.js';
+import { fixHonorifics, fixHeadingBrackets, writesSalla, wordCounts } from './honorifics.js';
 import { buildDocx } from './docx-builder.js';
 import { UNMAPPED } from './arabic.js';
 import { savePreview } from './preview.js';
@@ -60,10 +60,17 @@ export function runQuranGuard(pages, mode) {
   const summary = { found: 0, verified: 0, corrected: 0, diacriticsFixed: 0, needsReview: 0, unmatched: 0, citationWarnings: 0, citationsFixed: 0, items: [] };
   // the verses quoted on the last paragraphs: a book explains a passage verse by verse, so short quotations come from near them
   let recent = [];
+  // ﷺ first, over the whole document: once the book is seen to write it after every mention of the Prophet, the junk words the
+  // reader made of it can be recognised much more widely
+  const aiPars = pages.filter(({ model }) => !['image', 'blank', 'error'].includes(model.method)).flatMap(({ model }) => [...paragraphsOf(model)]).filter((p) => p.ai);
+  for (const par of aiPars) { fixHonorifics(par); fixHeadingBrackets(par); }
+  if (writesSalla(aiPars)) {
+    const counts = wordCounts(aiPars);
+    for (const par of aiPars) { fixHonorifics(par, { strict: true, counts }); fixHeadingBrackets(par); }
+  }
   for (const { model, meta } of pages) {
     if (model.method === 'image' || model.method === 'blank' || model.method === 'error') continue;
     for (const par of paragraphsOf(model)) {
-      if (par.ai) fixHonorifics(par);
       const { findings, refs = [] } = mode === 'off' ? { findings: [] } : guardParagraph(par, { mode, context: recent });
       if (refs.length) recent = [...recent, ...refs].slice(-8);
       for (const f of findings) if (f.citationFixed) summary.citationsFixed++;
@@ -94,11 +101,25 @@ export function runQuranGuard(pages, mode) {
  * @returns {Promise<number>} how many leading pages are front matter (0 when no text page is found early on)
  */
 async function frontMatter(pool, file, total, jobId) {
-  if (total < 12) return 0;
-  for (let n = 1; n <= Math.min(8, total); n++) {
+  const probes = [];
+  for (let n = 1; n <= Math.min(8, total - 1); n++) {
     const probe = await pool.run({ type: 'probe', file, n }, { jobId }).catch(() => null);
     if (!probe) return 0;
-    if (probe.full >= 10 && probe.color < 0.05) return n - 1;
+    if (probe.lines >= 14 && probe.full >= 10 && probe.color < 0.05) {
+      // the pages before the first page of text are front matter only if each looks like it: in colour (the cover), a few lines
+      // (half-title, title page, basmala), or "lines" far from the text's own height (measured: decorated blocks of a title or
+      // copyright page come out 3-10x as tall). A page of running text that merely has fewer lines (the end of a chapter) stops
+      // the count, so its text is still read.
+      let front = 0;
+      while (front < probes.length) {
+        const p = probes[front];
+        const odd = p.lineH && (p.lineH > probe.lineH * 1.8 || p.lineH < probe.lineH * 0.75);
+        if (!(p.color >= 0.05 || p.lines <= 6 || odd)) break;
+        front++;
+      }
+      return front;
+    }
+    probes.push(probe);
   }
   return 0;
 }
@@ -207,6 +228,8 @@ export function unifyAiFontSize(models) {
   }
 }
 
+const INFO_NOTES = new Set(['front-matter-picture']);
+
 export function buildReport({ results, quran, total, startedAt, bytes }) {
   const methods = {};
   const warnings = [];
@@ -215,7 +238,7 @@ export function buildReport({ results, quran, total, startedAt, bytes }) {
     methods[meta.method] = (methods[meta.method] || 0) + 1;
     for (const w of meta.warnings || []) {
       warnings.push({ page: meta.n, message: w });
-      review.add(meta.n);
+      if (!INFO_NOTES.has(w)) review.add(meta.n); // a note on what was done on purpose is no reason to check the page
     }
     if (meta.method === 'ocr' && meta.confidence < 70) review.add(meta.n);
     if (meta.unmapped > 0) review.add(meta.n);
