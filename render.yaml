@@ -9,7 +9,7 @@ services:
     # For real use pick standard (2 GB) and set WORKERS=2.
     plan: free
     region: frankfurt
-    buildCommand: npm ci --omit=dev
+    buildCommand: npm install --omit=dev --no-audit --no-fund
     startCommand: node src/server.js
     healthCheckPath: /api/health
     envVars:
