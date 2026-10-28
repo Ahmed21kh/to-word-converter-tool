@@ -155,6 +155,48 @@ test('full page through the pipeline: AI text, then the Quran guard restores the
   }
 });
 
+test('printMatch: a cover / title page is written as text in a box and the Word file has no picture at all', { skip: !existsSync(fixture) }, async () => {
+  const { openPdf } = await import('../src/pipeline/page-extract.js');
+  const { processPage } = await import('../src/pipeline/process-page.js');
+  const { dropPictures } = await import('../src/pipeline/convert-pdf.js');
+  const { buildDocx } = await import('../src/pipeline/docx-builder.js');
+  const { default: JSZip } = await import('jszip');
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'p2w-card-'));
+  try {
+    mode = 'ok';
+    const doc = await openPdf(fixture);
+    const opts = { mode: 'smart', ocr: 'auto', language: 'ar', engine: 'ai', defaultDir: 'rtl', printMatch: true };
+    const card = await processPage(doc, 1, { ...opts, asCard: true }, dir);
+    assert.ok(card.meta.warnings.includes('front-matter-card'));
+    const [box] = card.model.blocks;
+    assert.equal(box.type, 'table');
+    assert.ok(box.card);
+    assert.ok(box.cells[0].paras.every((p) => p.align === 'center'));
+    assert.ok(box.cells[0].paras.map((p) => p.runs.map((r) => r.text).join('')).join(' ').includes('الفصل الأول'));
+    // a page of text: its header / footer (running title, page number) is read as text, never cut out as a picture
+    const body = await processPage(doc, 1, opts, dir);
+    assert.equal(body.meta.method, 'ai');
+    assert.ok(body.model.blocks.every((b) => b.type !== 'image'));
+
+    // a picture that is still there (an ornament, a page nothing could be read from) never reaches the Word file
+    const pic = { model: { n: 2, width: 595, height: 842, margins: { top: 10, bottom: 10, left: 10, right: 10 }, method: 'image', blocks: [{ type: 'image', file: 'x.jpg', bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }] }, meta: { n: 2, method: 'image', warnings: [] } };
+    dropPictures([card, pic]);
+    assert.equal(pic.model.blocks.length, 0);
+    assert.equal(pic.meta.method, 'blank');
+    assert.ok(pic.meta.warnings.includes('pictures-removed'));
+
+    const buffer = await buildDocx([card.model, pic.model], { arabicFont: 'Traditional Arabic', latinFont: 'Times New Roman', pageDir: 'rtl', printMatch: true, detectHeadings: true });
+    const zip = await JSZip.loadAsync(buffer);
+    assert.equal(Object.keys(zip.files).filter((f) => f.startsWith('word/media/')).length, 0, 'no picture in the Word file');
+    const xml = await zip.file('word/document.xml').async('string');
+    assert.ok(xml.includes('<w:tbl>'), 'the cover text is inside a table');
+    assert.ok(xml.includes('الفصل الأول'));
+    assert.ok(!xml.includes('w:pStyle'), 'the cover title is not a heading of the book');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the free local provider (Ollama) sends the image and returns the same structure', async () => {
   const { readPageWithAi, visionStatus } = await import('../src/pipeline/vision-ocr.js');
   const saved = { p: process.env.VISION_PROVIDER, m: process.env.VISION_MODEL, u: process.env.OLLAMA_URL };
@@ -258,4 +300,14 @@ test('the Qari-OCR provider (llama.cpp server) reads a page and a line with prob
       else process.env[k] = v;
     }
   }
+});
+
+test('a calligraphic basmala the reader got wrong is written in full; a real phrase after "بسم الله" is kept', async () => {
+  const { fixBasmala } = await import('../src/pipeline/vision-ocr.js');
+  const fix = (text) => fixBasmala([{ text, heading: false, runs: [{ text, lowConf: true }] }])[0];
+  const p = fix('بِسَمِّ اللهِ لِكَمِّ الْجَبَّةِ');
+  assert.equal(p.text, 'بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ');
+  assert.deepEqual(p.runs, [{ text: p.text, lowConf: false }]);
+  assert.equal(fix('بسم الله الرحمن').text, 'بسم الله الرحمن الرحيم', 'a plain reading stays plain');
+  for (const kept of ['بسم الله وبه نستعين', 'بسم الله الحمد لله', 'بسم الله لكم الحبة وكان الناس كثيرا جدا في']) assert.equal(fix(kept).text, kept);
 });

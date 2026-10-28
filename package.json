@@ -4,11 +4,13 @@
   "private": true,
   "description": "Arabic-first PDF to Word converter: React + Ant Design + Tailwind frontend, Node.js backend",
   "scripts": {
-    "install:all": "npm --prefix backend install && npm --prefix frontend install",
+    "install:all": "npm --prefix backend install && npm --prefix frontend install && npm --prefix desktop install",
     "dev": "concurrently -k -n api,web -c cyan,magenta \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
     "build": "npm --prefix frontend run build",
     "start": "npm --prefix backend start",
-    "test": "npm --prefix backend test"
+    "test": "npm --prefix backend test",
+    "desktop": "npm --prefix frontend run build && npm --prefix desktop start",
+    "desktop:dist": "npm --prefix frontend run build && npm --prefix desktop run dist"
   },
   "devDependencies": {
     "concurrently": "^9.0.0"

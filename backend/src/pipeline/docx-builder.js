@@ -4,9 +4,10 @@ import { readFile } from 'node:fs/promises';
 import {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, ImageRun, WidthType, AlignmentType,
   HeadingLevel, SectionType, LineRuleType, TableLayoutType, PageOrientation, VerticalAlign,
-  CommentRangeStart, CommentRangeEnd, CommentReference, BorderStyle,
+  CommentRangeStart, CommentRangeEnd, CommentReference, BorderStyle, Tab, TabStopType,
 } from 'docx';
 import { ARABIC_ANY, ARABIC_LETTER, UNMAPPED } from './arabic.js';
+import { fitPage } from './page-fit.js';
 
 const TW = 20; // twips per point
 const tw = (pt) => Math.max(0, Math.round(pt * TW));
@@ -77,10 +78,12 @@ function runsToTextRuns(runs, par, o) {
     if (!r.text) continue;
     const cid = o.highlightUncertain && r.alts && r.alts.length && o.comments ? addComment(o, r.alts) : -1;
     if (cid >= 0) out.push(new CommentRangeStart(cid));
+    if (r.tab) out.push(new TextRun({ children: [new Tab()], rightToLeft: rtlPar })); // a running head: to the far end of the line
     for (const seg of segmentText(r.text, rtlPar)) {
       const isAr = seg.kind === 'ar' || (seg.kind === 'bad' && rtlPar);
       const fontName = isAr ? o.arabicFont : o.latinFont;
-      const size = hp(r.fs || par.fs || 12);
+      // a page shrunk to fit (printMatch) rounds down, never past the size that was measured to fit
+      const size = o.fsScale < 1 ? Math.max(2, Math.floor((r.fs || par.fs || 12) * o.fsScale * 2)) : hp(r.fs || par.fs || 12);
       const bad = seg.kind === 'bad';
       out.push(new TextRun({
         text: seg.text,
@@ -115,27 +118,36 @@ function headingFor(par, bodyFs, o) {
 
 const ALIGN = { center: AlignmentType.CENTER, both: AlignmentType.BOTH, end: AlignmentType.END };
 
+const lineGapOf = (par) => (par.lineGap && par.lineGap > par.fs * 0.9 && par.lineGap < par.fs * 4 ? par.lineGap : (par.fs || 12) * 1.45);
+
+const HEAD_RULE = { style: BorderStyle.SINGLE, size: 6, space: 4, color: '000000' };
+
 function buildParagraph(par, ctx) {
-  const { o, bodyFs, spaceBefore = 0, noSpacing = false } = ctx;
-  const lineGap = par.lineGap && par.lineGap > par.fs * 0.9 && par.lineGap < par.fs * 4 ? par.lineGap : (par.fs || 12) * 1.45;
+  const { o, bodyFs, spaceBefore = 0, noSpacing = false, spacingScale = 1, contentW } = ctx;
+  const lineGap = lineGapOf(par) * spacingScale;
+  // a running head (printMatch): the rule that sets it off from the text, as printed
+  let border = par.ruleAbove ? { top: { style: BorderStyle.SINGLE, size: 6, space: 8, color: '000000' } } : undefined;
+  if (par.runningHead) border = par.runningHead === 'top' ? { bottom: HEAD_RULE } : { top: HEAD_RULE };
   return new Paragraph({
     bidirectional: par.dir === 'rtl',
     alignment: ALIGN[par.align],
-    heading: headingFor(par, bodyFs, o),
+    heading: par.runningHead ? undefined : headingFor(par, bodyFs, o),
     indent: par.firstLine ? { firstLine: tw(par.firstLine) } : undefined,
-    border: par.ruleAbove ? { top: { style: BorderStyle.SINGLE, size: 6, space: 8, color: '000000' } } : undefined,
+    tabStops: par.runningHead && contentW ? [{ type: TabStopType.END, position: tw(contentW) - 10 }] : undefined,
+    border,
     spacing: {
-      before: noSpacing ? 0 : tw(Math.min(spaceBefore, 220)),
+      before: noSpacing ? 0 : tw(Math.min(spaceBefore, 220) * spacingScale),
       after: 0,
       line: tw(lineGap),
-      lineRule: LineRuleType.AT_LEAST,
+      // printMatch: exact line heights, so the page holds exactly the lines it was measured for
+      lineRule: o.printMatch && !noSpacing ? LineRuleType.EXACT : LineRuleType.AT_LEAST,
     },
+    widowControl: o.printMatch ? false : undefined,
     children: runsToTextRuns(par.runs, par, o),
   });
 }
 
-async function buildImage(block, contentW, o, region) {
-  const data = await readFile(block.file);
+function imageSize(block, contentW) {
   const maxW = Math.max(20, contentW);
   let w = block.wPt || block.bbox.x1 - block.bbox.x0;
   let h = block.hPt || block.bbox.y1 - block.bbox.y0;
@@ -143,6 +155,12 @@ async function buildImage(block, contentW, o, region) {
     h *= maxW / w;
     w = maxW;
   }
+  return { w, h };
+}
+
+async function buildImage(block, contentW, o, region) {
+  const data = await readFile(block.file);
+  const { w, h } = imageSize(block, contentW);
   const pxW = Math.max(1, Math.round((w * 96) / 72));
   const pxH = Math.max(1, Math.round((h * 96) / 72));
   const centered = region && Math.abs((block.bbox.x0 - region.x0) - (region.x1 - block.bbox.x1)) <= (region.x1 - region.x0) * 0.06;
@@ -159,7 +177,39 @@ async function buildImage(block, contentW, o, region) {
   });
 }
 
+// the box around a cover / title page read as text (printMatch): its padding, and the gap between its lines
+const CARD_PAD = { top: 8, bottom: 8, side: 10 };
+const CARD_GAP = 4;
+const CARD_BORDER = { style: BorderStyle.SINGLE, size: 12, color: '1F3864' };
+
+/** A cover / title page read as text: its lines centred in a bordered box, as Shamela shows a book's card. */
+function buildCard(block, ctx) {
+  const w = tw(block.colWidths[0]);
+  // the title of a cover is not a heading of the book (it would show up in its table of contents)
+  const o = { ...ctx.o, detectHeadings: false };
+  const paras = block.cells[0].paras.map((p, i) => buildParagraph(p, { ...ctx, o, spaceBefore: i ? CARD_GAP : 0 }));
+  const border = { top: CARD_BORDER, bottom: CARD_BORDER, left: CARD_BORDER, right: CARD_BORDER };
+  return new Table({
+    rows: [new TableRow({
+      children: [new TableCell({
+        width: { size: w, type: WidthType.DXA },
+        margins: { top: tw(CARD_PAD.top), bottom: tw(CARD_PAD.bottom), left: tw(CARD_PAD.side), right: tw(CARD_PAD.side) },
+        borders: border,
+        shading: { fill: 'EAF0FA', color: 'auto', type: 'clear' },
+        children: paras,
+      })],
+    })],
+    columnWidths: [w],
+    width: { size: w, type: WidthType.DXA },
+    layout: TableLayoutType.FIXED,
+    visuallyRightToLeft: true,
+    alignment: AlignmentType.CENTER,
+    borders: { ...border, insideHorizontal: CARD_BORDER, insideVertical: CARD_BORDER },
+  });
+}
+
 function buildTable(block, ctx) {
+  if (block.card) return buildCard(block, ctx);
   const { contentW } = ctx;
   const totalPt = block.colWidths.reduce((a, b) => a + b, 0);
   const scale = Math.min(1, contentW / Math.max(1, totalPt));
@@ -218,25 +268,48 @@ async function buildSection(page, bodyFs, o) {
   const contentW = width - margins.left - margins.right;
   const children = [];
   const region = { x0: margins.left, x1: width - margins.right };
-  let prev = null; // {bottom} in points
-  const ctxBase = { o, bodyFs, contentW };
 
+  // where each block goes: the space above a paragraph reproduces the gap between the printed lines
+  const layout = [];
+  let prev = null; // {bottom} in points
   for (const b of blocks) {
     if (b.type === 'p') {
       const lh = b.lineGap && b.lineGap > b.fs * 0.9 ? b.lineGap : b.fs * 1.45;
       let before = 0;
-      if (page.flow) before = 0;
+      if (page.flow || b.firstBaseline == null) before = 0;
       else if (prev) before = Math.max(0, (b.firstBaseline - lh * 0.8) - prev.bottom);
       else before = Math.max(0, b.firstBaseline - lh * 0.8 - margins.top);
-      children.push(buildParagraph(b, { ...ctxBase, spaceBefore: before }));
-      prev = { bottom: b.lastBaseline + lh * 0.2 };
+      layout.push({ block: b, before: Math.min(before, 220), lineGap: lineGapOf(b) });
+      if (b.lastBaseline != null) prev = { bottom: b.lastBaseline + lh * 0.2 };
+    } else if (b.type === 'table' && b.card) {
+      // its lines are text like any other: the page fit may make them smaller
+      const width = b.colWidths[0] - CARD_PAD.side * 2;
+      const inner = b.cells[0].paras.map((p, i) => ({ block: p, before: i ? CARD_GAP : 0, lineGap: lineGapOf(p), width }));
+      layout.push({ block: b, inner, height: CARD_PAD.top + CARD_PAD.bottom + 6 }); // + borders and the paragraph after the table
     } else if (b.type === 'table') {
-      children.push(buildTable(b, ctxBase));
-      children.push(new Paragraph({ spacing: { before: 0, after: 0, line: 20, lineRule: LineRuleType.EXACTLY }, children: [] }));
+      layout.push({ block: b, height: (b.rowHeights || []).reduce((a, h) => a + h, 0) + 1 });
       prev = { bottom: b.bbox.y1 };
     } else if (b.type === 'image') {
-      children.push(await buildImage(b, contentW, o, region));
+      layout.push({ block: b, height: imageSize(b, contentW).h });
       prev = { bottom: b.bbox.y1 };
+    }
+  }
+
+  // printMatch: shrink this page's text until it is sure to stay one Word page
+  const fit = o.printMatch ? await fitPage(page, layout, o) : { scale: 1, spacing: 1 };
+  if (fit.scale < 1 || fit.spacing < 1) o.fitted.push({ n: page.n, scale: fit.scale, spacing: fit.spacing });
+  const po = fit.scale < 1 ? { ...o, fsScale: fit.scale } : o;
+  const ctxBase = { o: po, bodyFs, contentW, spacingScale: fit.spacing };
+
+  for (const it of layout) {
+    const b = it.block;
+    if (b.type === 'p') {
+      children.push(buildParagraph(b, { ...ctxBase, spaceBefore: it.before }));
+    } else if (b.type === 'table') {
+      children.push(buildTable(b, ctxBase));
+      children.push(new Paragraph({ spacing: { before: 0, after: 0, line: 20, lineRule: LineRuleType.EXACT }, children: [] }));
+    } else if (b.type === 'image') {
+      children.push(await buildImage(b, contentW, o, region));
     }
   }
   if (!children.length) children.push(new Paragraph({ children: [] }));
@@ -264,7 +337,7 @@ async function buildSection(page, bodyFs, o) {
  * @returns {Promise<Buffer>}
  */
 export async function buildDocx(pages, opts) {
-  const o = { ...opts, comments: [] };
+  const o = { ...opts, comments: [], fitted: [] };
   const bodyFs = documentBodySize(pages);
   const sections = [];
   for (const p of pages) sections.push(await buildSection(p, bodyFs, o));
@@ -289,7 +362,9 @@ export async function buildDocx(pages, opts) {
     },
     sections,
   });
-  return Packer.toBuffer(doc);
+  const buffer = await Packer.toBuffer(doc);
+  if (opts.stats) opts.stats.fitted = o.fitted; // printMatch: the pages whose text was made smaller to stay one page
+  return buffer;
 }
 
 export { ARABIC_LETTER };

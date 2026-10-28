@@ -7,8 +7,9 @@ import {
 } from './page-extract.js';
 import { textQuality, UNMAPPED, dominantDirection } from './arabic.js';
 import { recognize } from './ocr.js';
-import { prepareForOcr, rgbaToGray, frameBands, crop, enhanceForAi } from './scan-clean.js';
-import { visionStatus, readPageWithAi, paragraphsToBlocks } from './vision-ocr.js';
+import { prepareForOcr, rgbaToGray, frameBands, crop, enhanceForAi, eraseRules } from './scan-clean.js';
+import { visionStatus, readPageWithAi, paragraphsToBlocks, fixBasmala } from './vision-ocr.js';
+import { readHead } from './running-head.js';
 import { segmentLines } from './text-lines.js';
 
 const OCR_DPI = 300;
@@ -88,6 +89,43 @@ async function ocrModel(page, n, opts, raw) {
   return { paras: res.paragraphs, res, body: res.body, prep: prep.info };
 }
 
+const FLOW_MARGINS = { top: 36, bottom: 30, left: 42, right: 42 };
+
+/**
+ * "Matches the printed edition" keeps no pictures (Shamela does not take them): a cover or title page is read as text and its
+ * lines are set centred inside a bordered box, the way Shamela shows a book's card. Null when the page has no text.
+ * A cloud model gets the page in colour as it is. The local line reader looks for dark ink on light paper, one line at a time: a
+ * dark cover (light letters) is inverted, and the frame and the rules around the text are taken away, or the frame's sides would
+ * join every line of the page into one. Latin letters are kept here (the ISBN, a web address).
+ */
+async function readCard(page, opts, width) {
+  const { canvas } = await renderPage(page, Number(process.env.VISION_IMAGE_DPI) || 200, 2600);
+  const W = canvas.width;
+  const H = canvas.height;
+  let jpeg;
+  if (visionStatus().provider === 'claude') jpeg = canvas.toBuffer('image/jpeg', 90);
+  else {
+    let gray = rgbaToGray(canvas.getContext('2d').getImageData(0, 0, W, H).data, W, H);
+    if (gray.reduce((s, v) => s + v, 0) / gray.length < 110) gray = gray.map((v) => 255 - v);
+    const bands = frameBands(gray, W, H);
+    const body = bands ? crop(gray, W, H, bands.body) : { gray, width: W, height: H };
+    jpeg = await enhanceForAi(eraseRules(body.gray, body.width, body.height), body.width, body.height);
+  }
+  // how sure the reader is of each word tells a line it could read from calligraphy it guessed at (settleCards)
+  const ai = await readPageWithAi(jpeg, { arabicOnly: false, ptPerPx: width / W, font: opts.arabicFont, card: true, probs: true });
+  if (ai.refused || ai.noText || !ai.paragraphs.length) return null;
+  // a page that holds only the basmala: drawn in calligraphy, the reader gets only "بسم الله" right
+  if (ai.paragraphs.length === 1) fixBasmala(ai.paragraphs, { minSim: 0.25, alone: true });
+  const paras = paragraphsToBlocks(ai.paragraphs, { bodyPt: ai.bodyPt }).map((p) => ({ ...p, align: 'center', firstLine: 0, ruleAbove: false, footnote: false }));
+  const boxW = (width - FLOW_MARGINS.left - FLOW_MARGINS.right) * 0.9;
+  const table = {
+    type: 'table', card: true, rtl: true, nR: 1, nC: 1, colWidths: [boxW], rowHeights: [0],
+    cells: [{ r: 0, c: 0, rowspan: 1, colspan: 1, paras }],
+    bbox: { x0: 0, y0: 0, x1: boxW, y1: 0 },
+  };
+  return { blocks: [table], usage: ai.usage, model: ai.model };
+}
+
 const pageSizeMeta = (page) => {
   const vp = page.getViewport({ scale: 1 });
   return { width: vp.width, height: vp.height };
@@ -106,12 +144,30 @@ export async function processPage(doc, n, opts, workDir) {
     const model = { n, width, height, blocks, margins: contentBox(blocks, width, height), method };
     if (flow) { // text without coordinates (AI reading): let Word flow it inside regular margins
       model.flow = true;
-      model.margins = { top: 36, bottom: 30, left: 42, right: 42 };
+      model.margins = { ...FLOW_MARGINS };
     }
     return { model, meta };
   };
+  // printMatch: the cover / title page as text in a box; a page without any text stays an empty page (never a picture)
+  const card = async () => {
+    const c = await readCard(page, opts, width);
+    if (!c) {
+      meta.warnings.push('front-matter-no-text');
+      return finish([], 'blank');
+    }
+    meta.warnings.push('front-matter-card');
+    return finish(c.blocks, 'ai', {
+      chars: c.blocks[0].cells[0].paras.reduce((s, p) => s + p.runs.reduce((a, r) => a + r.text.length, 0), 0),
+      pageDir: 'rtl',
+      aiModel: c.model,
+      aiTokens: { input: c.usage?.input_tokens || 0, output: c.usage?.output_tokens || 0 },
+      flow: true,
+      unmapped: 0,
+    });
+  };
 
   try {
+    if (opts.asCard && visionStatus().available) return await card();
     // ---- exact mode, or a book's cover / title page: the page as a picture ------------------
     if (opts.mode === 'exact' || opts.asPicture) {
       if (opts.asPicture) meta.warnings.push('front-matter-picture');
@@ -169,9 +225,17 @@ export async function processPage(doc, n, opts, workDir) {
           const gray = rgbaToGray(canvas.getContext('2d').getImageData(0, 0, W, H).data, W, H);
           const bands = frameBands(gray, W, H);
           const body = bands ? crop(gray, W, H, bands.body) : { gray, width: W, height: H };
+          // printMatch: the running heads (page number, running title) are read as text, at the same time as the page
+          const headOf = (box, atTop) => {
+            const c = crop(gray, W, H, box);
+            return readHead(c.gray, c.width, c.height, { atTop, arabicOnly: opts.language === 'ar' }).catch(() => null);
+          };
+          const framed = opts.printMatch && bands ? Promise.all([[bands.top, true], [bands.bottom, false]].filter(([b]) => b).map(([b, atTop]) => headOf(b, atTop))) : null;
           const ai = await readPageWithAi(await enhanceForAi(body.gray, body.width, body.height), { arabicOnly: opts.language === 'ar', ptPerPx: width / W, font: opts.arabicFont, probs: !!opts.highlightUncertain });
           if (ai.refused) meta.warnings.push('ai-declined-used-standard-ocr');
           else if (ai.noText) {
+            // a cover the clean-up made unreadable (light letters on a dark ground) is read again in colour
+            if (opts.printMatch) return await card();
             // cover art / ornaments: keep the picture
             const pic = await pagePicture(page, workDir, n, 170, 88);
             const block = { type: 'image', ...pic, bbox: { x0: 10, y0: 10, x1: width - 10, y1: height - 10 }, fullPage: true };
@@ -180,10 +244,12 @@ export async function processPage(doc, n, opts, workDir) {
             return r;
           } else {
             const blocks = paragraphsToBlocks(ai.paragraphs, { bodyPt: ai.bodyPt, ptPerPx: width / W, lineGapPt: ai.lineGapPt, footRatio: ai.footRatio });
-            // page number / running title / drawn line: kept as pictures in their place (top strip first, footer last)
+            // page number / running title / drawn line: kept as pictures in their place (top strip first, footer last); printMatch
+            // reads them as text instead, and the book-level pass sets them (settleRunningHeads)
             const strips = [];
+            const heads = framed ? await framed : [];
             for (const [box, atTop] of [[bands?.top, true], [bands?.bottom, false]]) {
-              if (!box) continue;
+              if (!box || opts.printMatch) continue;
               const c = crop(gray, W, H, box);
               const { default: sharp } = await import('sharp');
               const file = path.join(workDir, `p${n}_margin_${atTop ? 'top' : 'bottom'}.png`);
@@ -195,13 +261,17 @@ export async function processPage(doc, n, opts, workDir) {
             // a page without a frame: its running header (title, rule, page number) was found in the text lines
             if (!bands && ai.headerBox) {
               const pad = Math.round(H * 0.004);
-              const c = crop(gray, W, H, { x0: 0, x1: W, y0: Math.max(0, ai.headerBox.y0 - pad), y1: Math.min(H, ai.headerBox.y1 + pad) });
-              const { default: sharp } = await import('sharp');
-              const file = path.join(workDir, `p${n}_margin_top.png`);
-              await writeFile(file, await sharp(Buffer.from(c.gray.buffer, c.gray.byteOffset, c.gray.length), { raw: { width: c.width, height: c.height, channels: 1 } }).png().toBuffer());
-              const wPt = (c.width / W) * width;
-              const hPt = (c.height / H) * height;
-              strips.push({ atTop: true, block: { type: 'image', file, imgType: 'png', wPt, hPt, bbox: { x0: 0, y0: 0, x1: wPt, y1: hPt }, margin: true } });
+              const box = { x0: 0, x1: W, y0: Math.max(0, ai.headerBox.y0 - pad), y1: Math.min(H, ai.headerBox.y1 + pad) };
+              if (opts.printMatch) heads.push(await headOf(box, true));
+              else {
+                const c = crop(gray, W, H, box);
+                const { default: sharp } = await import('sharp');
+                const file = path.join(workDir, `p${n}_margin_top.png`);
+                await writeFile(file, await sharp(Buffer.from(c.gray.buffer, c.gray.byteOffset, c.gray.length), { raw: { width: c.width, height: c.height, channels: 1 } }).png().toBuffer());
+                const wPt = (c.width / W) * width;
+                const hPt = (c.height / H) * height;
+                strips.push({ atTop: true, block: { type: 'image', file, imgType: 'png', wPt, hPt, bbox: { x0: 0, y0: 0, x1: wPt, y1: hPt }, margin: true } });
+              }
             }
             for (const s of strips) { if (s.atTop) blocks.unshift(s.block); else blocks.push(s.block); }
             if (ai.truncated) meta.warnings.push('ai-output-truncated');
@@ -222,6 +292,9 @@ export async function processPage(doc, n, opts, workDir) {
               const clamp = (v) => Math.min(width * 0.3, Math.max(18, v));
               aiPage.model.margins = { ...aiPage.model.margins, left: clamp((offX + ai.textBox.x0) * ptPerPx), right: clamp(width - (offX + ai.textBox.x1) * ptPerPx) };
             }
+            const fs = Math.round((ai.bodyPt || 14) * 0.85 * 2) / 2;
+            const found = heads.filter(Boolean).map((h) => ({ ...h, fs }));
+            if (found.length) aiPage.model.heads = found;
             return aiPage;
           }
         } catch (err) {

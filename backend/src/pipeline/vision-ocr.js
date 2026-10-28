@@ -11,7 +11,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import sharp from 'sharp';
 import { dominantDirection, normalizeShaping, stripMarks } from './arabic.js';
-import { replaceRange } from './quran.js';
+import { replaceRange, matchKey, rasmKey } from './quran.js';
 import { sallaSlots, sallaLetters } from './honorifics.js';
 import { createCanvas } from '@napi-rs/canvas';
 import { segmentLines, hasRule, findFootnoteRule } from './text-lines.js';
@@ -195,14 +195,14 @@ async function viaLlamaCpp(jpeg, maxTokens = 2000, { probs = false, timeoutMs, p
  * @param {Buffer} jpeg page render (JPEG)
  * @returns {Promise<{paragraphs:{text:string,heading:boolean}[], noText:boolean, refused?:boolean, truncated?:boolean, usage?:object, model:string}>}
  */
-export async function readPageWithAi(jpeg, { arabicOnly = true, ptPerPx, font, probs = false } = {}) {
+export async function readPageWithAi(jpeg, { arabicOnly = true, ptPerPx, font, probs = false, card = false } = {}) {
   const st = visionStatus();
   if (!st.available) throw new Error('AI reading is not configured (set VISION_PROVIDER)');
   // a local model reads far more accurately line by line (and tells how sure it is); a large cloud model reads the whole page
   const byLines = st.provider !== 'claude' && (process.env.VISION_MODE || 'lines') !== 'page';
   if (byLines) {
-    const res = await readPageByLines(jpeg, st.model, { arabicOnly, provider: st.provider, ptPerPx, font, probs });
-    if (res) return res;
+    const res = await readPageByLines(jpeg, st.model, { arabicOnly, provider: st.provider, ptPerPx, font, probs, card });
+    if (res) { fixBasmala(res.paragraphs); return res; }
     // no text line on the page (a cover, an ornament): Qari reads lines, a whole page would not even fit its context
     if (st.provider === 'llamacpp') return { paragraphs: [], noText: true, usage: { output_tokens: 0 }, model: st.model };
   }
@@ -212,7 +212,29 @@ export async function readPageWithAi(jpeg, { arabicOnly = true, ptPerPx, font, p
   if (out.refused) return { paragraphs: [], noText: false, refused: true, usage: out.usage, model: st.model };
   const parsed = parseTranscription(out.text);
   if (arabicOnly) for (const p of parsed.paragraphs) p.text = p.text.split(' ').map((w) => cleanArabicLetters(w)).filter(Boolean).join(' ');
+  fixBasmala(parsed.paragraphs);
   return { ...parsed, truncated: out.truncated, usage: out.usage, model: st.model };
+}
+
+/**
+ * Read one line image (8-bit grey) that is known to be a single line, such as a running title or a page number: one request, no
+ * search for lines in it. Small pieces (a lone digit) are enlarged to the height of a body line, with white space around them as
+ * the line reader is used to.
+ */
+export async function readLineImage(gray, w, h, { arabicOnly = true, minHeight = 60 } = {}) {
+  const st = visionStatus();
+  if (!st.available) throw new Error('AI reading is not configured (set VISION_PROVIDER)');
+  const scale = Math.max(1, minHeight / Math.max(1, h));
+  const jpeg = await sharp(Buffer.from(gray.buffer, gray.byteOffset, gray.length), { raw: { width: w, height: h, channels: 1 } })
+    .resize({ width: Math.round(w * scale), height: Math.round(h * scale) })
+    .extend({ top: 20, bottom: 20, left: 40, right: 40, background: { r: 255, g: 255, b: 255 } })
+    .jpeg({ quality: 92 })
+    .toBuffer();
+  const out = st.provider === 'llamacpp' ? await viaLlamaCpp(jpeg, 120, { timeoutMs: 60_000 })
+    : st.provider === 'ollama' ? await viaOllama(jpeg, st.model, LINE_SYSTEM_PROMPT, LINE_USER_PROMPT, 120, { numCtx: 2048, timeoutMs: 60_000 })
+      : await viaClaude(jpeg, st.model, LINE_SYSTEM_PROMPT, LINE_USER_PROMPT, 200);
+  const text = out.refused ? '' : cleanArabicLine(normalizeShaping(String(out.text || '').split('\n').join(' ')), { arabicOnly });
+  return { text: text === NO_TEXT ? '' : text, usage: out.usage };
 }
 
 const cleanArabicLetters = (s) => Array.from(s).filter((ch) => !(/\p{L}/u.test(ch) && !/\p{Script=Arabic}/u.test(ch))).join('');
@@ -226,7 +248,7 @@ const flagConf = () => Number(process.env.AI_FLAG_CONF) || 0.5;
  * the server ranks its whole vocabulary on the CPU for every token it writes, which costs about a fifth of the reading time.
  * @param {Buffer} jpeg the (enhanced) page body
  */
-export async function readPageByLines(jpeg, model, { arabicOnly = true, provider = 'ollama', ptPerPx, font, probs = false } = {}) {
+export async function readPageByLines(jpeg, model, { arabicOnly = true, provider = 'ollama', ptPerPx, font, probs = false, card = false } = {}) {
   const { data, info } = await sharp(jpeg).greyscale().raw().toBuffer({ resolveWithObject: true });
   const { width: w, height: h } = info;
   const boxes = segmentLines(data, w, h);
@@ -289,8 +311,12 @@ export async function readPageByLines(jpeg, model, { arabicOnly = true, provider
     }
   }
   await Promise.all(Array.from({ length: Math.min(parallel, boxes.length) }, worker));
-  await rereadShortLines(read, { w, readBox });
-  await markSallaLines(read, { w, readBox });
+  // a cover or a title page (`card`): no second readings (its calligraphy would ask for one on every line, in vain), and each printed
+  // line stays a paragraph of its own, as it is set on the page
+  if (!card) {
+    await rereadShortLines(read, { w, readBox });
+    await markSallaLines(read, { w, readBox });
+  }
   const lines = read.filter((l) => l.words.length);
   if (!lines.length) return { paragraphs: [], noText: true, usage: { output_tokens: tokens }, model };
   // The page as it was printed: where the text block sits, how far apart its lines are, and the size that makes a line of the Word
@@ -310,7 +336,22 @@ export async function readPageByLines(jpeg, model, { arabicOnly = true, provider
   const bodyBoxes = lines.filter((l) => !l.footnote);
   const footBoxes = lines.filter((l) => l.footnote);
   const footRatio = pitchOf(bodyBoxes) && pitchOf(footBoxes) ? Math.min(0.9, Math.max(0.62, pitchOf(footBoxes) / pitchOf(bodyBoxes))) : 0.75;
-  return { paragraphs: unifyDigits(fixNoteNumbers(groupLines(lines)), arabicOnly), noText: false, usage: { output_tokens: tokens }, model, mode: 'lines', bodyPt, lineGapPt, textBox, headerBox, footRatio };
+  const paragraphs = card ? lines.map((l) => cardLine(l.words)) : unifyDigits(fixNoteNumbers(groupLines(lines)), arabicOnly);
+  return { paragraphs, noText: false, usage: { output_tokens: tokens }, model, mode: 'lines', bodyPt, lineGapPt, textBox, headerBox, footRatio };
+}
+
+/** One printed line of a card as a paragraph: centred, its words marked when the reader was unsure of them (`lowConf`). */
+function cardLine(words) {
+  const flag = flagConf();
+  const runs = [];
+  words.forEach((x, i) => {
+    const text = normalizeShaping(x.text) + (i < words.length - 1 ? ' ' : '');
+    const lowConf = x.conf < flag;
+    const last = runs[runs.length - 1];
+    if (last && last.lowConf === lowConf) last.text += text;
+    else runs.push({ text, lowConf });
+  });
+  return { text: normalizeShaping(words.map((x) => x.text).join(' ')), heading: false, center: true, footnote: false, indent: 0, runs };
 }
 
 const lettersOf = (words) => words.reduce((n, x) => n + stripMarks(x.text).length, 0);
@@ -484,6 +525,41 @@ export function fixNoteNumbers(paragraphs) {
 }
 
 const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+
+const BASMALA = 'بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ';
+const BASMALA_REST = rasmKey(matchKey('الرحمن الرحيم'));
+const rasmOf = (words) => rasmKey(words.map(matchKey).join(''));
+const shapeSim = (a, b) => {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return 1 - prev[b.length] / Math.max(1, a.length, b.length);
+};
+
+/**
+ * The basmala of a title page or of the head of a book is drawn in calligraphy, which the reader cannot read: "بسم الله" comes
+ * out right and the rest as other words ("بِسَمِّ اللهِ لِكَمِّ الْجَبَّةِ"). A line of its own that starts with "بسم الله" and goes on
+ * with words shaped like "الرحمن الرحيم" (measured by letter shapes, dots aside: misreadings 0.5 and up, a real phrase such as
+ * "وبه نستعين" or "الحمد لله" 0.4 at most) is the basmala, and is written in full: with diacritics when the reading had them.
+ */
+export function fixBasmala(paragraphs, { minSim = 0.45, alone = false } = {}) {
+  for (const p of paragraphs) {
+    const words = p.text.split(' ').filter(Boolean);
+    if (words.length < 3 || words.length > 5 || rasmOf(words.slice(0, 2)) !== rasmOf(['بسم', 'الله'])) continue;
+    // `alone`: the only line of its page. Whatever the reader made of "الرحمن الرحيم" there keeps the article of both words
+    // ("الله اله", "لكم الجمن"), where a real phrase after the basmala's first words does not ("وبه نستعين")
+    const articles = alone && words.length <= 4 && words.slice(2).every((x) => /^ا?ل/.test(stripMarks(x)));
+    if (!articles && shapeSim(rasmOf(words.slice(2)), BASMALA_REST) < minSim) continue;
+    const text = stripMarks(p.text) === p.text ? stripMarks(BASMALA) : BASMALA;
+    if (text === p.text) continue;
+    p.text = text;
+    if (p.runs) p.runs = [{ text, lowConf: false }];
+  }
+  return paragraphs;
+}
 
 /**
  * Lines -> paragraphs and headings from the geometry of the page: a paragraph ends on a line that stops short of the left edge

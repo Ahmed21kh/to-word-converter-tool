@@ -8,3 +8,4 @@ backend/test/fixtures/scan-p*.jpg
 *.log
 .env
 .DS_Store
+desktop/release/

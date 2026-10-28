@@ -7,7 +7,7 @@ const { app, jobs } = await createApp();
 
 // NOTE: Express 5 does not throw when listen() fails, it passes the error to the callback. Handle it
 // explicitly, otherwise a busy port would log "listening" and then exit silently (nodemon: "clean exit").
-const server = app.listen(config.port);
+const server = app.listen(config.port, process.env.HOST || undefined); // HOST=127.0.0.1: this machine only (desktop app)
 server.once('listening', () => {
   logger.info({ port: config.port, workers: config.workers, maxConcurrentJobs: config.maxConcurrentJobs }, 'PDF to Word API listening');
 });
@@ -38,4 +38,9 @@ async function shutdown(signal) {
 }
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
+// started by the desktop app (desktop/main.js): on Windows a kill skips the code above, so it asks over IPC; if the app dies, stop too
+if (process.send) {
+  process.on('message', (m) => { if (m === 'shutdown') shutdown('desktop app'); });
+  process.on('disconnect', () => shutdown('desktop app gone'));
+}
 process.on('unhandledRejection', (err) => logger.error({ err: String(err?.stack || err) }, 'unhandled rejection'));

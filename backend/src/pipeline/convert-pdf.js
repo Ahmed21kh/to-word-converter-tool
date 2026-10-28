@@ -7,6 +7,7 @@ import { buildDocx } from './docx-builder.js';
 import { UNMAPPED } from './arabic.js';
 import { savePreview } from './preview.js';
 import { visionStatus } from './vision-ocr.js';
+import { settleRunningHeads } from './running-head.js';
 
 export const DEFAULT_OPTIONS = {
   format: 'docx', // docx | doc
@@ -20,6 +21,7 @@ export const DEFAULT_OPTIONS = {
   highlightUncertain: false, // doubtful words: yellow highlight + comment, only when asked
   detectHeadings: true,
   frontAsPictures: true, // AI reading of a scanned book: the cover and title pages before its first page of text stay pictures
+  printMatch: false, // "matches the printed edition": one Word page per PDF page, text shrunk per page so nothing spills over
 };
 
 export function normalizeOptions(input = {}) {
@@ -34,9 +36,11 @@ export function normalizeOptions(input = {}) {
   const font = (v, d) => (typeof v === 'string' && /^[\p{L}\p{N} \-]{2,40}$/u.test(v) ? v : d);
   o.arabicFont = font(input.arabicFont, o.arabicFont);
   o.latinFont = font(input.latinFont, o.latinFont);
-  for (const k of ['highlightUncertain', 'detectHeadings', 'frontAsPictures']) {
+  for (const k of ['highlightUncertain', 'detectHeadings', 'frontAsPictures', 'printMatch']) {
     if (input[k] !== undefined) o[k] = input[k] === true || input[k] === 'true' || input[k] === '1';
   }
+  // "matches the printed edition" is text only: pages as pictures (exact) cannot be part of it
+  if (o.printMatch && o.mode === 'exact') o.mode = 'smart';
   return o;
 }
 
@@ -155,7 +159,9 @@ export async function convertPdf(ctx) {
   const saved = path.join(workDir, 'pages');
   await mkdir(saved, { recursive: true });
   const loadPage = (n) => readFile(path.join(saved, `${n}.json`), 'utf8').then(JSON.parse).catch(() => null);
-  const front = vision?.available && options.frontAsPictures ? await frontMatter(pool, file, total, jobId) : 0;
+  // the cover and title pages: pictures, or (printMatch, which keeps no pictures) their text in a box
+  const front = vision?.available && (options.frontAsPictures || options.printMatch) ? await frontMatter(pool, file, total, jobId) : 0;
+  const frontAs = options.printMatch ? { asCard: true } : { asPicture: true };
   let next = 0;
   await Promise.all(Array.from({ length: lanes }, async () => {
     while (next < total) {
@@ -166,7 +172,7 @@ export async function convertPdf(ctx) {
       const n = ++next;
       let page = await loadPage(n);
       if (!page) {
-        page = await runPage(n, n <= front ? { asPicture: true } : {});
+        page = await runPage(n, n <= front ? frontAs : {});
         if (page.model?.method !== 'error') await writeFile(path.join(saved, `${n}.json`), JSON.stringify(page)).catch(() => {});
       }
       results[n - 1] = page;
@@ -192,20 +198,46 @@ export async function convertPdf(ctx) {
     }));
   }
   pool.broadcast({ type: 'release', file }).catch(() => {});
+  if (options.printMatch) dropPictures(results);
 
   onProgress({ phase: 'verifying', done: total, total });
   const quran = runQuranGuard(results, options.quran);
 
   onProgress({ phase: 'building', done: total, total });
   const pageModels = results.map((r) => r.model);
+  // printMatch: the page numbers from the page sequence, the running titles as the book prints them
+  const heads = settleRunningHeads(pageModels, { bookTitle: ctx.title });
   unifyAiFontSize(pageModels);
   if (ctx.previewDir) await savePreview(pageModels, ctx.previewDir, { name: ctx.title, rtl: options.language !== 'en', highlight: options.highlightUncertain });
   const dirs = results.map((r) => r.meta.pageDir).filter(Boolean);
   const pageDir = dirs.filter((d) => d === 'rtl').length >= dirs.length / 2 && dirs.length ? 'rtl' : (options.language === 'en' ? 'ltr' : 'rtl');
-  const buffer = await buildDocx(pageModels, { ...options, pageDir, title: ctx.title });
+  const stats = {};
+  const buffer = await buildDocx(pageModels, { ...options, pageDir, title: ctx.title, stats });
   await writeFile(outPath, buffer);
 
-  return buildReport({ results, quran, total, startedAt: t0, bytes: buffer.length });
+  const report = buildReport({ results, quran, total, startedAt: t0, bytes: buffer.length });
+  if (options.printMatch) {
+    const fitted = stats.fitted || [];
+    report.printMatch = { pages: total, shrunk: fitted.length, smallestScale: fitted.length ? Math.min(...fitted.map((f) => f.scale)) : 1, heads };
+  }
+  return report;
+}
+
+/**
+ * printMatch: Shamela takes no pictures, so none reaches the Word file. Whatever is still a picture (an ornament of a text page,
+ * a page nothing could be read from) is left out, and the page is marked for review.
+ */
+export function dropPictures(results) {
+  for (const { model, meta } of results) {
+    const kept = model.blocks.filter((b) => b.type !== 'image');
+    if (kept.length === model.blocks.length) continue;
+    model.blocks = kept;
+    meta.warnings = [...(meta.warnings || []), 'pictures-removed'];
+    if (!kept.length) {
+      model.method = 'blank';
+      meta.method = 'blank';
+    }
+  }
 }
 
 /**
@@ -215,12 +247,12 @@ export async function convertPdf(ctx) {
 export function unifyAiFontSize(models) {
   const ai = models.filter((m) => m.method === 'ai' && m.flow);
   const isHeading = (b) => b.align === 'center' && b.runs[0]?.bold;
-  const sizes = ai.flatMap((m) => m.blocks.filter((b) => b.type === 'p' && !isHeading(b) && !b.footnote).map((b) => b.fs)).sort((a, b) => a - b);
+  const sizes = ai.flatMap((m) => m.blocks.filter((b) => b.type === 'p' && !isHeading(b) && !b.footnote && !b.margin).map((b) => b.fs)).sort((a, b) => a - b);
   if (ai.length < 2 || !sizes.length) return;
   const body = sizes[Math.floor(sizes.length / 2)];
   for (const m of ai) {
     for (const b of m.blocks) {
-      if (b.type !== 'p') continue;
+      if (b.type !== 'p' || b.margin) continue; // a running title read as text (printMatch) stays smaller
       const fs = isHeading(b) ? body + 4 : b.footnote ? Math.round(body * (b.footRatio || 0.75) * 2) / 2 : body;
       b.fs = fs;
       for (const r of b.runs) r.fs = fs;
@@ -228,7 +260,7 @@ export function unifyAiFontSize(models) {
   }
 }
 
-const INFO_NOTES = new Set(['front-matter-picture']);
+const INFO_NOTES = new Set(['front-matter-picture', 'front-matter-card']);
 
 export function buildReport({ results, quran, total, startedAt, bytes }) {
   const methods = {};

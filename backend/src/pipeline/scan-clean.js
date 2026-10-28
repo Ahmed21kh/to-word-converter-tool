@@ -123,6 +123,33 @@ export function frameBands(gray, w, h) {
 }
 
 /**
+ * Paints out the straight rules of a title or copyright page (the sides and top of its frame, a box drawn around its text), in
+ * place. A frame's sides hold ink on every row, so a line finder sees the whole page as one line. No stroke of Arabic text is
+ * that long: an alif is about one line tall, a kashida far shorter than half the page.
+ */
+export function eraseRules(gray, w, h, { inkBelow = 140, longV = Math.round(h * 0.06), longH = Math.round(w * 0.5) } = {}) {
+  const paint = (idx) => { for (const i of idx) gray[i] = 255; };
+  const runs = (count, len, at, long) => {
+    for (let a = 0; a < count; a++) {
+      let run = [];
+      for (let b = 0; b <= len; b++) {
+        const i = b < len ? at(a, b) : -1;
+        if (i >= 0 && gray[i] < inkBelow) run.push(i);
+        else { if (run.length >= long) paint(run); run = []; }
+      }
+    }
+  };
+  // both directions are measured before anything is painted: a rule that crosses another must not be cut in two
+  const before = Uint8Array.from(gray);
+  runs(w, h, (x, y) => y * w + x, longV);
+  const afterV = Uint8Array.from(gray);
+  gray.set(before);
+  runs(h, w, (y, x) => y * w + x, longH);
+  for (let i = 0; i < gray.length; i++) gray[i] = Math.max(gray[i], afterV[i]);
+  return gray;
+}
+
+/**
  * Make a page crop easy to read for a vision model: flatten uneven paper tone / shadows (divide by a block-wise paper
  * estimate), stretch the contrast so ink is black and paper white, and sharpen thin strokes and dots slightly.
  * Returns a JPEG buffer. Nothing is binarised: dots and diacritics keep their grey edges.

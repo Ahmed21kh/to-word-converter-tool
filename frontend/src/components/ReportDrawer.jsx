@@ -62,6 +62,12 @@ export default function ReportDrawer({ jobId, name, onClose }) {
           {report.scan?.aiPages > 0 && (
             <Alert type="success" showIcon title={t('report.method.ai')} description={t('report.aiText', { pages: report.scan.aiPages, inTok: report.scan.aiInputTokens.toLocaleString(), outTok: report.scan.aiOutputTokens.toLocaleString() })} />
           )}
+          {report.printMatch && (
+            <Alert type="info" showIcon title={t('converter.options.printMatch')} description={[
+              t('report.printMatchText', { pages: report.printMatch.pages, shrunk: report.printMatch.shrunk, pct: Math.round(report.printMatch.smallestScale * 100) }),
+              report.printMatch.heads && t('report.printMatchHeads', { titles: report.printMatch.heads.titles, dropped: report.printMatch.heads.dropped, cards: report.printMatch.heads.cards || 0, cardDropped: report.printMatch.heads.cardLinesDropped || 0 }),
+            ].filter(Boolean).join(' ')} />
+          )}
           {report.scan?.ocrPages > 0 && (
             <Alert type="info" showIcon title={t('report.scanTitle')} description={t('report.scanText', { ocr: report.scan.ocrPages, strip: report.scan.diacriticsStripped, pics: report.scan.keptAsPictures })} />
           )}

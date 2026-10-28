@@ -6,7 +6,7 @@ import path from 'node:path';
 const round = (n) => Math.round(n * 10) / 10;
 
 const simplifyRuns = (runs, hl) => runs.map((r) => {
-  const o = { x: r.text };
+  const o = { x: r.tab ? `   ${r.text}` : r.text }; // a running head's far end: set apart by wide spaces
   if (r.bold || r.verse) o.b = 1; // verses are set heavier, as in the Word file
   if (r.italic) o.i = 1;
   if (r.lowConf && hl) o.l = 1; // doubtful words are marked only when the option is on

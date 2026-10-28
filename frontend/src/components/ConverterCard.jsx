@@ -12,7 +12,7 @@ const PreviewDrawer = lazy(() => import('./PreviewDrawer.jsx'));
 
 const DEFAULT_OPTIONS = {
   format: 'docx', mode: 'smart', language: 'ar', engine: 'standard', quran: 'correct',
-  highlightUncertain: false, detectHeadings: true, frontAsPictures: true, arabicFont: 'Traditional Arabic',
+  highlightUncertain: false, detectHeadings: true, frontAsPictures: true, printMatch: false, arabicFont: 'Traditional Arabic',
 };
 const FALLBACK_CAPS = {
   accept: ['.pdf', '.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.bmp', '.gif', '.txt', '.md', '.csv'],
@@ -154,12 +154,18 @@ export default function ConverterCard({ onCapabilities }) {
         <span className="font-semibold">{t('converter.options.headings')}</span>
         <Switch checked={options.detectHeadings} onChange={(v) => setOpt('detectHeadings', v)} />
       </label>
-      {options.engine === 'ai' && (
+      {options.engine === 'ai' && !options.printMatch && (
         <label className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
           <span className="font-semibold">{t('converter.options.frontAsPictures')}</span>
           <Switch checked={options.frontAsPictures !== false} onChange={(v) => setOpt('frontAsPictures', v)} />
         </label>
       )}
+      <Tooltip title={t('converter.options.printMatchHint')}>
+        <label className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+          <span className="font-semibold">{t('converter.options.printMatch')}</span>
+          <Switch checked={!!options.printMatch} onChange={(v) => setOpt('printMatch', v)} />
+        </label>
+      </Tooltip>
     </div>
   );
 
