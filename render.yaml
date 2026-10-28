@@ -1,0 +1,39 @@
+# Render blueprint for the API (backend/). The frontend is deployed separately on Vercel (frontend/vercel.json).
+# Render dashboard: New > Blueprint > pick this repository. Values marked `sync: false` are asked for when the blueprint is created.
+services:
+  - type: web
+    name: pdf2word-api
+    runtime: node
+    rootDir: backend
+    # free: 512 MB, sleeps after 15 idle minutes (the first request then waits about a minute).
+    # For real use pick standard (2 GB) and set WORKERS=2.
+    plan: free
+    region: frankfurt
+    buildCommand: npm ci --omit=dev
+    startCommand: node src/server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      # the Vercel site, e.g. https://your-site.vercel.app (comma separated if there are several, no trailing slash)
+      - key: CORS_ORIGINS
+        sync: false
+      # this service's own address, e.g. https://pdf2word-api.onrender.com: enables the "Word view (Microsoft)" tab
+      - key: PUBLIC_URL
+        sync: false
+      # one page worker fits in 512 MB; each more needs about 300 MB
+      - key: WORKERS
+        value: "1"
+      - key: MAX_CONCURRENT_JOBS
+        value: "1"
+      - key: MAX_UPLOAD_MB
+        value: "100"
+      - key: RETENTION_MINUTES
+        value: "60"
+      # AI reading: the local Qari model cannot run on Render. Leave empty for the free OCR, or set "claude" with an API key
+      - key: VISION_PROVIDER
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

@@ -108,6 +108,24 @@ Not helpful and therefore not shipped: line-by-line recognition (60%, touching l
 (did not produce usable text even on clean synthetic lines).
 Native Tesseract 5.4 with the larger "best" Arabic model was also measured on the same page: 84.9% (the bundled fast model scores 86.0% with the native engine too), so the engine and model size are not the limit.
 
+## Deploy: frontend on Vercel, API on Render
+
+Both deploy from this GitHub repository; push first.
+
+1. **API on Render**: New > Blueprint > this repository ([render.yaml](render.yaml)). When asked, set `CORS_ORIGINS` to the
+   Vercel address (e.g. `https://your-site.vercel.app`, no trailing slash) and `PUBLIC_URL` to the Render address
+   (e.g. `https://pdf2word-api.onrender.com`). Leave `VISION_PROVIDER` empty for the free OCR, or set `claude` and
+   `ANTHROPIC_API_KEY` (the local Qari model cannot run on Render). Check `https://<api>/api/health`.
+2. **Site on Vercel**: Add New > Project > this repository, **Root Directory `frontend`** (build settings come from
+   [frontend/vercel.json](frontend/vercel.json)). Environment variables: `VITE_API_URL` = the Render address,
+   `VITE_SITE_URL` = the Vercel address. Both are built into the pages, so redeploy after changing them.
+3. Back on Render, make sure `CORS_ORIGINS` holds the final Vercel address (a custom domain too, comma separated).
+
+Render's free plan has 512 MB and sleeps after 15 idle minutes (the first request then takes about a minute); keep
+`WORKERS=1` there. For real use pick a 2 GB plan and `WORKERS=2`. Files live on the instance's own disk: a restart or a
+redeploy loses unfinished jobs. If every visitor hits the rate limit together, the visitor's address is behind more
+proxies than counted: set `TRUST_PROXY=2` (or 3).
+
 ## What was verified (on this machine)
 
 * 650-page Arabic PDF (a different Quran verse on every page): converted in **~7.5 s** with 3 workers; **649 of 650 verses came out

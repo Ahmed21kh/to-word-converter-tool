@@ -32,7 +32,7 @@ export async function createApp() {
   await mkdir(path.join(config.dataDir, 'jobs'), { recursive: true });
 
   app.disable('x-powered-by');
-  app.set('trust proxy', config.env === 'production' ? 1 : false);
+  app.set('trust proxy', config.trustProxy);
 
   // Microsoft's online viewer fetches the file from the public address, so it only works for a real public https site
   const officeViewerOn = (() => {

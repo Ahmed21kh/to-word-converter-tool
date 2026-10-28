@@ -13,6 +13,8 @@ export const config = {
   // public https address of this site (e.g. https://pdf.example.com): enables the optional Microsoft Word viewer in the preview
   publicUrl: (process.env.PUBLIC_URL || '').trim().replace(new RegExp(`${String.fromCharCode(47)}+$`), ''),
   env: process.env.NODE_ENV || 'development',
+  // proxies in front of the API (a host's load balancer): the visitor's address, which the rate limits count, is that many hops back
+  trustProxy: process.env.TRUST_PROXY !== undefined && process.env.TRUST_PROXY !== '' ? int(process.env.TRUST_PROXY, 1) : process.env.NODE_ENV === 'production' ? 1 : false,
   // comma separated list of allowed browser origins; empty = same-origin only (use the Vite proxy in dev)
   corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173').split(',').map((s) => s.trim()).filter(Boolean),
   dataDir: process.env.DATA_DIR || path.join(root, 'storage'),
