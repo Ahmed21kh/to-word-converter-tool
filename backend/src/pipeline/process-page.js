@@ -7,9 +7,10 @@ import {
 } from './page-extract.js';
 import { textQuality, UNMAPPED, dominantDirection } from './arabic.js';
 import { recognize } from './ocr.js';
-import { prepareForOcr, rgbaToGray, frameBands, crop, enhanceForAi, eraseRules } from './scan-clean.js';
+import { prepareForOcr, rgbaToGray, frameBands, crop, enhanceForAi, eraseRules, inkFromGround } from './scan-clean.js';
 import { visionStatus, readPageWithAi, paragraphsToBlocks, fixBasmala } from './vision-ocr.js';
 import { readHead } from './running-head.js';
+import { matchKey, rasmKey } from './quran.js';
 import { segmentLines } from './text-lines.js';
 
 const OCR_DPI = 300;
@@ -44,6 +45,13 @@ export async function probePage(doc, n) {
   return { lines: boxes.length, full, color: colored / Math.max(1, sampled), lineH: heights.length ? heights[heights.length >> 1] : 0 };
 }
 
+/** The page as printed, small: shown in the preview beside the converted page. */
+export async function sourcePicture(doc, n, out) {
+  const { canvas } = await renderPage(await doc.getPage(n), 110, 1400);
+  await writeFile(out, canvas.toBuffer('image/jpeg', 75));
+  return true;
+}
+
 /**
  * 'ar' = Arabic model only (clearly the most accurate on Arabic books: the English model makes it
  * mistake letters), 'mixed' = Arabic + English for documents with real English passages.
@@ -64,8 +72,9 @@ async function pagePicture(page, workDir, n, dpi, quality = 85) {
   return { file, imgType: 'jpg', wPt: vp.width, hPt: vp.height, scale };
 }
 
-async function ocrModel(page, n, opts, raw) {
+async function ocrModel(page, n, opts, raw, blank = () => {}) {
   const { canvas } = await renderPage(page, OCR_DPI, 4200);
+  blank(canvas);
   const vp = page.getViewport({ scale: 1 });
   const effDpi = (canvas.width / vp.width) * 72;
   const rgba = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
@@ -89,6 +98,20 @@ async function ocrModel(page, n, opts, raw) {
   return { paras: res.paragraphs, res, body: res.body, prep: prep.info };
 }
 
+/**
+ * Whether a paragraph read from a page picture is only the page's text overlay over again (`overlay`: the text layer's own text):
+ * two words or more, seven in ten of them overlay words (compared by letter shapes, dots aside), or no letter at all.
+ */
+export function overlayTest(overlay) {
+  const keyOf = (w) => rasmKey(matchKey(w));
+  const words = new Set(String(overlay).split(/\s+/).map(keyOf).filter((k) => k.length >= 2));
+  return (text) => {
+    if (!/\p{L}/u.test(text)) return true;
+    const ws = String(text).split(/\s+/).map(keyOf).filter((k) => k.length >= 2);
+    return ws.length >= 2 && ws.filter((k) => words.has(k)).length >= ws.length * 0.7;
+  };
+}
+
 const FLOW_MARGINS = { top: 36, bottom: 30, left: 42, right: 42 };
 
 /**
@@ -103,16 +126,18 @@ async function readCard(page, opts, width) {
   const W = canvas.width;
   const H = canvas.height;
   let jpeg;
-  if (visionStatus().provider === 'claude') jpeg = canvas.toBuffer('image/jpeg', 90);
+  if (visionStatus().external) jpeg = canvas.toBuffer('image/jpeg', 90);
   else {
-    let gray = rgbaToGray(canvas.getContext('2d').getImageData(0, 0, W, H).data, W, H);
-    if (gray.reduce((s, v) => s + v, 0) / gray.length < 110) gray = gray.map((v) => 255 - v);
+    // the lettering dark on white, whatever the colours of the cover (light letters on a dark ground included)
+    const gray = inkFromGround(rgbaToGray(canvas.getContext('2d').getImageData(0, 0, W, H).data, W, H), W, H);
     const bands = frameBands(gray, W, H);
     const body = bands ? crop(gray, W, H, bands.body) : { gray, width: W, height: H };
     jpeg = await enhanceForAi(eraseRules(body.gray, body.width, body.height), body.width, body.height);
   }
   // how sure the reader is of each word tells a line it could read from calligraphy it guessed at (settleCards)
-  const ai = await readPageWithAi(jpeg, { arabicOnly: false, ptPerPx: width / W, font: opts.arabicFont, card: true, probs: true });
+  const ai = await readPageWithAi(jpeg, { arabicOnly: false, ptPerPx: width / W, font: opts.arabicFont, card: true, probs: true, batch: opts.batch, cache: opts.aiCache });
+  // a line with no Arabic letter, no digit and no address is the reader talking ("I've been"), not the page
+  ai.paragraphs = ai.paragraphs.filter((p) => /[؀-ۿ0-9]|@|www\.|https?:/.test(p.text));
   if (ai.refused || ai.noText || !ai.paragraphs.length) return null;
   // a page that holds only the basmala: drawn in calligraphy, the reader gets only "بسم الله" right
   if (ai.paragraphs.length === 1) fixBasmala(ai.paragraphs, { minSim: 0.25, alone: true });
@@ -183,9 +208,29 @@ export async function processPage(doc, n, opts, workDir) {
     const hasText = textChars >= 8 && opts.mode !== 'ocr';
     const imgArea = raw.images.reduce((s, i) => s + (i.x1 - i.x0) * (i.y1 - i.y0), 0);
     const coverage = imgArea / (width * height);
+    // A scanned page with a little text laid over it (a distributor's web address or watermark, a page number added by a tool):
+    // the page is the picture, and the text layer is not the book's. It is read from the picture, and what the reader makes of
+    // the overlay there is left out (isOverlay).
+    // Such an overlay sits in the top or bottom margin only: a page of real text over a picture (a decorative frame, a paper
+    // texture) has its text in the body of the page, and keeps it.
+    const inMargin = (it) => it.y < height * 0.1 || it.y - it.fs > height * 0.9;
+    const overlaid = hasText && coverage >= 0.5 && textChars < 400 && raw.items.every((it) => !it.str.trim() || inMargin(it));
+    let isOverlay = () => false;
+    // the overlay's text is painted out of the page picture before it is read (isOverlay catches what is left)
+    const blank = (canvas) => {
+      if (!overlaid) return;
+      const k = canvas.width / width;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      for (const it of raw.items) ctx.fillRect((it.x - 2) * k, (it.y - it.fs * 1.15) * k, (it.w + 4) * k, it.fs * 1.6 * k);
+    };
+    if (overlaid) {
+      isOverlay = overlayTest(pageText(buildTextPage(raw, { defaultDir: opts.defaultDir, reverseHint: opts.reverseHint ?? null })));
+      meta.warnings.push('scanned-under-text-layer');
+    }
 
     let textResult = null;
-    if (hasText) {
+    if (hasText && !overlaid) {
       const m = buildTextPage(raw, { defaultDir: opts.defaultDir, reverseHint: opts.reverseHint ?? null });
       await finalizeBlocks(page, raw, m, { workDir, pageNum: n });
       const text = pageText(m);
@@ -212,11 +257,12 @@ export async function processPage(doc, n, opts, workDir) {
     }
 
     // ---- OCR path ---------------------------------------------------------------------
-    const wantOcr = opts.ocr !== 'never' && (opts.mode === 'ocr' || !hasText || textResult);
+    const wantOcr = opts.ocr !== 'never' && (opts.mode === 'ocr' || !hasText || textResult || overlaid);
     if (wantOcr && (opts.mode === 'ocr' || textResult || textChars < 8 ? true : coverage > 0.3)) {
       if (opts.engine === 'ai' && visionStatus().available) {
         try {
           const { canvas } = await renderPage(page, Number(process.env.VISION_IMAGE_DPI) || 200, 2600);
+          blank(canvas);
           // A framed book page: the model reads only what is inside the frame (enhanced: even paper tone, strong contrast,
           // slightly sharpened). The header / footer strips outside the frame (running title, page number, the drawn
           // line) are not read at all: they are cut out of the page and placed back as pictures, exactly as printed.
@@ -231,8 +277,12 @@ export async function processPage(doc, n, opts, workDir) {
             return readHead(c.gray, c.width, c.height, { atTop, arabicOnly: opts.language === 'ar' }).catch(() => null);
           };
           const framed = opts.printMatch && bands ? Promise.all([[bands.top, true], [bands.bottom, false]].filter(([b]) => b).map(([b, atTop]) => headOf(b, atTop))) : null;
-          const ai = await readPageWithAi(await enhanceForAi(body.gray, body.width, body.height), { arabicOnly: opts.language === 'ar', ptPerPx: width / W, font: opts.arabicFont, probs: !!opts.highlightUncertain });
+          const ai = await readPageWithAi(await enhanceForAi(body.gray, body.width, body.height), { arabicOnly: opts.language === 'ar', ptPerPx: width / W, font: opts.arabicFont, probs: !!opts.highlightUncertain, batch: opts.batch, cache: opts.aiCache });
+          // a second reading (convert-pdf.js) after a failed one: no standard OCR, the first result stays
+          if (ai.refused && opts.aiRetry) throw Object.assign(new Error('AI declined the page again'), { aiRetryFailed: true });
           if (ai.refused) meta.warnings.push('ai-declined-used-standard-ocr');
+          // read by a fallback reader, or in bands, after the first one declined or failed
+          else if (ai.tried?.length) meta.warnings.push(`ai-fallback:${ai.via}`);
           else if (ai.noText) {
             // a cover the clean-up made unreadable (light letters on a dark ground) is read again in colour
             if (opts.printMatch) return await card();
@@ -243,7 +293,7 @@ export async function processPage(doc, n, opts, workDir) {
             r.model.margins = { top: 10, bottom: 10, left: 10, right: 10 };
             return r;
           } else {
-            const blocks = paragraphsToBlocks(ai.paragraphs, { bodyPt: ai.bodyPt, ptPerPx: width / W, lineGapPt: ai.lineGapPt, footRatio: ai.footRatio });
+            const blocks = paragraphsToBlocks(ai.paragraphs.filter((p) => !isOverlay(p.text)), { bodyPt: ai.bodyPt, ptPerPx: width / W, lineGapPt: ai.lineGapPt, footRatio: ai.footRatio });
             // page number / running title / drawn line: kept as pictures in their place (top strip first, footer last); printMatch
             // reads them as text instead, and the book-level pass sets them (settleRunningHeads)
             const strips = [];
@@ -281,7 +331,8 @@ export async function processPage(doc, n, opts, workDir) {
               words: texts.reduce((sum, t) => sum + t.split(' ').length, 0),
               pageDir: dominantDirection(texts.join(' ')) || 'rtl',
               aiModel: ai.model,
-              aiTokens: { input: ai.usage?.input_tokens || 0, output: ai.usage?.output_tokens || 0 },
+              aiTokens: { input: ai.usage?.input_tokens || 0, output: ai.usage?.output_tokens || 0, cached: ai.usage?.cached_tokens || 0 },
+              ...(ai.via ? { aiVia: ai.via } : {}),
               flow: true,
               unmapped: 0,
             });
@@ -293,15 +344,23 @@ export async function processPage(doc, n, opts, workDir) {
               aiPage.model.margins = { ...aiPage.model.margins, left: clamp((offX + ai.textBox.x0) * ptPerPx), right: clamp(width - (offX + ai.textBox.x1) * ptPerPx) };
             }
             const fs = Math.round((ai.bodyPt || 14) * 0.85 * 2) / 2;
-            const found = heads.filter(Boolean).map((h) => ({ ...h, fs }));
+            const found = heads.filter(Boolean)
+              .map((h) => (h.title && isOverlay(h.title) ? { ...h, title: null } : h))
+              // a head whose title was seen but not read is kept: the pages around it give its title and its number
+              .filter((h) => h.title || h.hasNumber || h.hasTitle)
+              .map((h) => ({ ...h, fs }));
             if (found.length) aiPage.model.heads = found;
             return aiPage;
           }
         } catch (err) {
+          // pass 1 of a batch conversion: the page is read in pass 2, from the batch's answers
+          if (err?.deferred) throw err;
+          if (opts.aiRetry) throw Object.assign(err, { aiRetryFailed: true });
           meta.warnings.push(`ai-failed-used-standard-ocr:${String(err.message).slice(0, 90)}`);
         }
       }
-      const { paras, res, prep } = await ocrModel(page, n, opts, raw);
+      const { paras: read, res, prep } = await ocrModel(page, n, opts, raw, blank);
+      const paras = read.filter((p) => !isOverlay(p.runs.map((r) => r.text).join('')));
       // Real text pages score 55-70 after cleaning; decorative covers, calligraphy and ornaments score far lower
       // and must stay pictures instead of becoming nonsense text.
       const enough = res.words >= 3 && res.confidence >= (textResult ? 55 : 52);
@@ -347,6 +406,7 @@ export async function processPage(doc, n, opts, workDir) {
     }
     return finish([], 'blank');
   } catch (err) {
+    if (err?.deferred || err?.aiRetryFailed) throw err; // not a page error: the batch reads it, or the first reading stays
     meta.warnings.push(`page-error:${err.message}`);
     meta.error = err.message;
     try { // never leave a blank page: keep the original look as a picture

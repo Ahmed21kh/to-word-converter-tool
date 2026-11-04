@@ -1,7 +1,7 @@
 // Worker thread: owns open pdf.js documents and an OCR engine; processes one task at a time.
 import { parentPort } from 'node:worker_threads';
 import { openPdf } from '../pipeline/page-extract.js';
-import { processPage, probePage } from '../pipeline/process-page.js';
+import { processPage, probePage, sourcePicture } from '../pipeline/process-page.js';
 import { terminateOcr } from '../pipeline/ocr.js';
 
 const docs = new Map();
@@ -26,6 +26,10 @@ async function handle(msg) {
     case 'probe': {
       const doc = await getDoc(msg.file);
       return probePage(doc, msg.n);
+    }
+    case 'source': {
+      const doc = await getDoc(msg.file);
+      return sourcePicture(doc, msg.n, msg.out);
     }
     case 'release': {
       const p = docs.get(msg.file);

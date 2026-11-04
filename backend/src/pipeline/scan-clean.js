@@ -150,6 +150,46 @@ export function eraseRules(gray, w, h, { inkBelow = 140, longV = Math.round(h * 
 }
 
 /**
+ * A cover's lettering, dark on white whatever its colours: gold or white letters on a dark ground and dark letters on a light one
+ * alike. Each pixel is measured against the ground around it (the median of its block, blended between blocks): what stands out
+ * from the ground, lighter or darker, is ink. A whole page turned over (the earlier way) lost the light letters of a cover whose
+ * dark ground is only part of it.
+ */
+export function inkFromGround(gray, w, h, { B = 96 } = {}) {
+  const bw = Math.ceil(w / B);
+  const bh = Math.ceil(h / B);
+  const bg = new Float32Array(bw * bh);
+  for (let by = 0; by < bh; by++) {
+    for (let bx = 0; bx < bw; bx++) {
+      const hist = new Uint32Array(256);
+      let n = 0;
+      for (let y = by * B; y < Math.min(h, (by + 1) * B); y++) {
+        for (let x = bx * B; x < Math.min(w, (bx + 1) * B); x++) { hist[gray[y * w + x]]++; n++; }
+      }
+      let acc = 0;
+      for (let k = 0; k < 256; k++) { acc += hist[k]; if (acc >= n / 2) { bg[by * bw + bx] = k; break; } }
+    }
+  }
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const fy = Math.min(bh - 1, Math.max(0, y / B - 0.5));
+    const y0 = Math.floor(fy);
+    const y1 = Math.min(bh - 1, y0 + 1);
+    const ty = fy - y0;
+    for (let x = 0; x < w; x++) {
+      const fx = Math.min(bw - 1, Math.max(0, x / B - 0.5));
+      const x0 = Math.floor(fx);
+      const x1 = Math.min(bw - 1, x0 + 1);
+      const tx = fx - x0;
+      const ground = (bg[y0 * bw + x0] * (1 - tx) + bg[y0 * bw + x1] * tx) * (1 - ty) + (bg[y1 * bw + x0] * (1 - tx) + bg[y1 * bw + x1] * tx) * ty;
+      const d = Math.abs(gray[y * w + x] - ground);
+      out[y * w + x] = Math.max(0, Math.min(255, Math.round(255 - (d - 18) * 3)));
+    }
+  }
+  return out;
+}
+
+/**
  * Make a page crop easy to read for a vision model: flatten uneven paper tone / shadows (divide by a block-wise paper
  * estimate), stretch the contrast so ink is black and paper white, and sharpen thin strokes and dots slightly.
  * Returns a JPEG buffer. Nothing is binarised: dots and diacritics keep their grey edges.
@@ -188,8 +228,16 @@ export async function enhanceForAi(gray, w, h) {
       out[y * w + x] = Math.min(255, Math.round((gray[y * w + x] * 255) / paper));
     }
   }
+  // contrast stretched between the 1st and 99th percentiles, but black is never set lighter than ink: on a title page the ink is
+  // under 1% of the page, the 1st percentile falls in the faint print showing through from the back of the leaf, and stretching
+  // to it turned that print black (measured: ink 0.6-0.8% of a title page, the show-through at 200-240)
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < out.length; i++) hist[out[i]]++;
+  const at = (q) => { let acc = 0; for (let k = 0; k < 256; k++) { acc += hist[k]; if (acc >= out.length * q) return k; } return 255; };
+  const lo = Math.min(at(0.01), 96);
+  const hi = Math.max(at(0.99), lo + 64);
+  for (let i = 0; i < out.length; i++) out[i] = Math.max(0, Math.min(255, Math.round(((out[i] - lo) * 255) / (hi - lo))));
   return sharp(Buffer.from(out.buffer, out.byteOffset, out.length), { raw: { width: w, height: h, channels: 1 } })
-    .normalise({ lower: 1, upper: 99 })
     .sharpen({ sigma: 0.8 })
     .jpeg({ quality: 92 })
     .toBuffer();

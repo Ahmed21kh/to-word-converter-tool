@@ -1,6 +1,6 @@
 // Image files (JPG/PNG/WebP/TIFF/BMP/GIF) -> Word via OCR, or the picture itself in "exact" mode.
 import path from 'node:path';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import sharp from 'sharp';
 import { recognize } from './ocr.js';
 import { ocrLang } from './process-page.js';
@@ -84,17 +84,23 @@ export async function convertImage(ctx) {
   const meta = await sharp(file).metadata();
   const total = Math.min(meta.pages || 1, 500);
   const results = [];
+  if (ctx.previewDir) await mkdir(ctx.previewDir, { recursive: true });
   for (let n = 1; n <= total; n++) {
     if (isCancelled()) throw new Error('cancelled');
     onProgress({ phase: 'converting', done: n - 1, total });
     results.push(await pageModel(file, n, options, workDir));
+    // the picture as given, small, for the preview beside the converted page
+    if (ctx.previewDir) {
+      await sharp(file, { page: n - 1 }).rotate().resize({ width: 1400, height: 1400, fit: 'inside', withoutEnlargement: true }).flatten({ background: '#ffffff' })
+        .jpeg({ quality: 75 }).toFile(path.join(ctx.previewDir, `src-${n}.jpg`)).catch(() => {});
+    }
   }
   onProgress({ phase: 'verifying', done: total, total });
   const quran = runQuranGuard(results, options.quran);
   onProgress({ phase: 'building', done: total, total });
   const dirs = results.map((r) => r.meta.pageDir).filter(Boolean);
   const pageDir = dirs.length && dirs.filter((d) => d === 'rtl').length >= dirs.length / 2 ? 'rtl' : 'ltr';
-  if (ctx.previewDir) await savePreview(results.map((r) => r.model), ctx.previewDir, { name: ctx.title });
+  if (ctx.previewDir) await savePreview(results.map((r) => r.model), ctx.previewDir, { name: ctx.title, source: true });
   const buffer = await buildDocx(results.map((r) => r.model), { ...options, pageDir, title: ctx.title });
   await writeFile(outPath, buffer);
   return buildReport({ results, quran, total, startedAt: t0, bytes: buffer.length });

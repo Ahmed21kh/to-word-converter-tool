@@ -1,7 +1,7 @@
 {
   "name": "pdf-to-word-desktop",
   "productName": "PDF to Word",
-  "version": "1.0.0",
+  "version": "1.3.3",
   "description": "Arabic-first PDF to Word converter - desktop app",
   "author": "Ahmed Khaled",
   "license": "UNLICENSED",
@@ -22,6 +22,8 @@
     "files": [
       "main.js",
       "loading.html",
+      "key.html",
+      "preload.js",
       "build/icon.png",
       "package.json"
     ],
@@ -31,6 +33,7 @@
         "to": "backend",
         "filter": [
           "**/*",
+          "!node_modules/**",
           "!storage/**",
           "!test/**",
           "!scripts/**",

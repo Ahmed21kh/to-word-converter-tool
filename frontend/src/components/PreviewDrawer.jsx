@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Button, Drawer, InputNumber, Segmented, Slider, Spin, Alert } from 'antd';
+import { Button, Drawer, InputNumber, Segmented, Slider, Spin, Switch, Alert } from 'antd';
 import { DownloadOutlined, LeftOutlined, RightOutlined, ZoomInOutlined } from '@ant-design/icons';
 import { useI18n } from '../i18n/index.jsx';
 import { downloadUrl, getPreview, previewImageUrl } from '../lib/api.js';
@@ -86,6 +86,20 @@ function Paper({ page, jobId, scale }) {
   );
 }
 
+// the page as printed, at the size of the converted page beside it
+function Original({ jobId, n, w, h, scale }) {
+  const { t } = useI18n();
+  const [failed, setFailed] = useState(false);
+  const box = { width: w * scale, margin: '0 auto', background: '#fff', boxShadow: '0 4px 24px rgba(15,23,42,.18)' };
+  if (failed) {
+    return <div style={{ ...box, height: h * scale }} className="flex items-center justify-center p-6 text-center text-sm text-slate-500">{t('preview.originalMissing')}</div>;
+  }
+  return <img src={previewImageUrl(jobId, `src-${n}.jpg`)} alt={`${t('preview.original')} ${n}`} onError={() => setFailed(true)} style={{ ...box, display: 'block', height: 'auto' }} />;
+}
+
+const SIDE_KEY = 'preview.side';
+const readSide = () => { try { return localStorage.getItem(SIDE_KEY) !== '0'; } catch { return true; } };
+
 // Microsoft's online viewer opens the .docx from its public address (only possible on a published https site)
 const officeEmbedUrl = (baseUrl, jobId) => `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(`${baseUrl}/api/jobs/${jobId}/document.docx`)}`;
 
@@ -107,6 +121,8 @@ export default function PreviewDrawer({ jobId, name, officeViewer, onClose }) {
   const { t, dir } = useI18n();
   const [view, setView] = useState('quick');
   const [total, setTotal] = useState(0);
+  const [hasSource, setHasSource] = useState(false);
+  const [sideOn, setSideOn] = useState(readSide);
   const [pageNo, setPageNo] = useState(1);
   const [zoom, setZoom] = useState(100);
   const [state, setState] = useState('loading');
@@ -119,6 +135,7 @@ export default function PreviewDrawer({ jobId, name, officeViewer, onClose }) {
     if (cache.current.has(n)) return;
     const res = await getPreview(jobId, n, 4);
     setTotal(res.total);
+    setHasSource(!!res.source);
     res.pages.forEach((p) => cache.current.set(p.n, p));
   }, [jobId]);
 
@@ -146,13 +163,24 @@ export default function PreviewDrawer({ jobId, name, officeViewer, onClose }) {
     return () => ro.disconnect();
   }, [wrapEl]);
 
+  const side = hasSource && sideOn;
+  // the next printed page is fetched ahead, so paging on shows it at once
+  useEffect(() => {
+    if (side && pageNo < total) new Image().src = previewImageUrl(jobId, `src-${pageNo + 1}.jpg`);
+  }, [side, pageNo, total, jobId]);
+  const toggleSide = (on) => {
+    setSideOn(on);
+    try { localStorage.setItem(SIDE_KEY, on ? '1' : '0'); } catch { /* a convenience only */ }
+  };
+
   const page = cache.current.get(pageNo);
-  const fit = page && width ? Math.max(0.3, Math.min(1.6, (width - 40) / page.w)) : 0.8;
+  const column = side ? (width - 56) / 2 : width - 40;
+  const fit = page && width ? Math.max(0.2, Math.min(1.6, column / page.w)) : 0.8;
   const scale = fit * (zoom / 100);
   const go = (n) => setPageNo(Math.min(Math.max(1, n), total || 1));
   const Prev = dir === 'rtl' ? RightOutlined : LeftOutlined;
   const Next = dir === 'rtl' ? LeftOutlined : RightOutlined;
-  const drawerWidth = typeof window === 'undefined' ? 900 : Math.min(980, window.innerWidth);
+  const drawerWidth = typeof window === 'undefined' ? 900 : Math.min(side ? 1800 : 980, window.innerWidth);
 
   return (
     <Drawer
@@ -182,6 +210,10 @@ export default function PreviewDrawer({ jobId, name, officeViewer, onClose }) {
           <span className="text-sm">{t('preview.of')} {total || '…'}</span>
           <Button icon={<Next />} onClick={() => go(pageNo + 1)} disabled={pageNo >= total} aria-label={t('preview.next')} />
         </div>}
+        {view === 'quick' && hasSource && <label className="flex cursor-pointer items-center gap-2 text-sm">
+          <Switch size="small" checked={sideOn} onChange={toggleSide} />
+          <span>{t('preview.sideBySide')}</span>
+        </label>}
         {view === 'quick' && <div className="ms-auto flex min-w-[170px] items-center gap-2">
           <ZoomInOutlined aria-hidden="true" />
           <Slider className="!m-0 flex-1" min={50} max={200} step={10} value={zoom} onChange={setZoom} aria-label={t('preview.zoom')} tooltip={{ formatter: (v) => `${v}%` }} />
@@ -197,7 +229,20 @@ export default function PreviewDrawer({ jobId, name, officeViewer, onClose }) {
       <div ref={setWrapEl} dir="ltr" className="min-h-0 flex-1 overflow-auto bg-slate-200/70 p-5 dark:bg-slate-950">
         {state === 'loading' && !page && <div className="py-24 text-center"><Spin /> <div className="mt-3 text-slate-500">{t('preview.loading')}</div></div>}
         {state === 'error' && <Alert type="error" showIcon title={t('preview.failed')} />}
-        {page && <div key={page.n} className="fade-in"><Paper page={page} jobId={jobId} scale={scale} /></div>}
+        {page && !side && <div key={page.n} className="fade-in"><Paper page={page} jobId={jobId} scale={scale} /></div>}
+        {page && side && (
+          // in reading order: the printed page first, the converted one after it
+          <div key={page.n} dir={dir} className="fade-in flex items-start justify-center gap-4">
+            <figure className="m-0">
+              <figcaption className="mb-2 text-center text-xs font-medium text-slate-500 dark:text-slate-400">{t('preview.original')}</figcaption>
+              <Original jobId={jobId} n={page.n} w={page.w} h={page.h} scale={scale} />
+            </figure>
+            <figure className="m-0">
+              <figcaption className="mb-2 text-center text-xs font-medium text-slate-500 dark:text-slate-400">{t('preview.converted')}</figcaption>
+              <Paper page={page} jobId={jobId} scale={scale} />
+            </figure>
+          </div>
+        )}
       </div>
       )}
 

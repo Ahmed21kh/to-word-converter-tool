@@ -14,7 +14,7 @@ import { convertText } from '../pipeline/convert-text.js';
 import { visionStatus } from '../pipeline/vision-ocr.js';
 import { ensureLlamaServer } from './llama-server.js';
 
-const PHASE_WEIGHT = { queued: 0, analyzing: 2, converting: 90, verifying: 94, building: 97, finalizing: 99, done: 100 };
+const PHASE_WEIGHT = { queued: 0, analyzing: 2, batchPreparing: 2, batchWaiting: 2, converting: 90, retrying: 90, verifying: 94, building: 97, finalizing: 99, done: 100 };
 const PAUSE_TTL = 24 * 60 * 60_000;
 
 export class JobManager extends EventEmitter {
@@ -178,9 +178,14 @@ export class JobManager extends EventEmitter {
       // resolves when the job may go on (at once unless it is paused); rejects when it is cancelled meanwhile
       waitIfPaused: () => (job._paused ? new Promise((resolve, reject) => job._waiters.push({ resolve, reject })) : null),
     };
+    let watch = null;
     try {
       let report;
-      if (job.options.engine === 'ai') await ensureLlamaServer().catch((err) => logger.warn({ err: err.message }, 'AI reader not available, using the standard OCR'));
+      if (job.options.engine === 'ai') {
+        await ensureLlamaServer().catch((err) => logger.warn({ err: err.message }, 'AI reader not available, using the standard OCR'));
+        // a server that stops in the middle of a book is started again; the pages waiting for it go on with the AI
+        watch = setInterval(() => ensureLlamaServer().catch(() => {}), 10_000);
+      }
       if (job.kind === 'pdf') report = await convertPdf(ctx);
       else if (job.kind === 'image') report = await convertImage(ctx);
       else if (job.kind === 'text') report = await convertText(ctx);
@@ -214,6 +219,7 @@ export class JobManager extends EventEmitter {
         logger.error({ jobId: job.id, err: err.stack }, 'conversion failed');
       }
     } finally {
+      clearInterval(watch);
       if (job.resumedAt) job.activeMs += Date.now() - job.resumedAt;
       job.resumedAt = null;
       job.finishedAt = Date.now();

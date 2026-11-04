@@ -1,8 +1,9 @@
 // Desktop app: runs the converter's own server (backend/) on this machine and shows its interface in a window.
-// The local AI reader (Qari-OCR through Ollama's llama-server) starts together with the app when it is installed; when it is
-// not, the app offers once to install it (ai/setup-ai.ps1, the same script the installer runs: it looks first, then installs
-// only what is missing).
-const { app, BrowserWindow, dialog, shell, Menu } = require('electron');
+// The AI reader is Google Gemini by default: its key is asked for once and kept on this machine only (encrypted). The local
+// reader (Qari-OCR through Ollama's llama-server) is optional: chosen from the "AI" menu it replaces Gemini, starts together
+// with the app, and is offered for installation when missing (ai/setup-ai.ps1: it looks first, then installs only what is
+// missing).
+const { app, BrowserWindow, dialog, shell, Menu, ipcMain, safeStorage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -47,6 +48,39 @@ function aiStatus() {
   return { server, models, ready: !!(server && models), declined: !!saved.declined };
 }
 
+// ---- the Gemini key: Windows encrypts it for this user (DPAPI); it never leaves this machine except to Google -----------
+function geminiKey() {
+  const v = readState().geminiKey;
+  if (!v || !v.startsWith('enc:')) return v || '';
+  try { return safeStorage.decryptString(Buffer.from(v.slice(4), 'base64')); } catch { return ''; }
+}
+function saveGeminiKey(key) {
+  if (!key) return writeState({ geminiKey: '' });
+  writeState({ geminiKey: safeStorage.isEncryptionAvailable() ? `enc:${safeStorage.encryptString(key).toString('base64')}` : key });
+}
+
+/** Google answers a wrong key with 400/401/403. No network, or a busy service, keeps the key unchecked. */
+async function checkGeminiKey(key) {
+  try {
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1', { headers: { 'x-goog-api-key': key }, signal: AbortSignal.timeout(20_000) });
+    if (r.ok) return { ok: true };
+    return [400, 401, 403].includes(r.status) ? { ok: false } : { ok: true, unchecked: true };
+  } catch {
+    return { ok: true, unchecked: true };
+  }
+}
+
+/** The reader the API is started with: the local one when chosen (and installed), else Gemini when there is a key, else none. */
+function readerEnv(ai) {
+  const off = { LOCAL_AI: '0', VISION_PROVIDER: '' };
+  if (readState().localAi) {
+    // the local reader starts with the app (and gives its memory back after 2 idle minutes; it reloads by itself on the next page)
+    return ai.ready ? { LOCAL_AI: '1', LOCAL_AI_PROVIDER: 'llamacpp', LLAMA_SERVER_EXE: ai.server, QARI_DIR: ai.models, QARI_EAGER: '1' } : off;
+  }
+  const key = geminiKey();
+  return key ? { LOCAL_AI: '0', VISION_PROVIDER: 'gemini', GEMINI_API_KEY: key } : off;
+}
+
 // ---- the API ---------------------------------------------------------------------------------------------------------
 function freePort(port) {
   return new Promise((resolve) => {
@@ -83,11 +117,8 @@ async function startBackend() {
     DATA_DIR: path.join(app.getPath('userData'), 'storage'),
     FRONTEND_DIST: FRONTEND,
     CORS_ORIGINS: `http://127.0.0.1:${port}`,
+    ...readerEnv(ai),
   };
-  if (ai.ready) {
-    // the AI starts with the app (and gives its memory back after 2 idle minutes; it reloads by itself on the next page)
-    Object.assign(env, { VISION_PROVIDER: 'llamacpp', LLAMA_SERVER_EXE: ai.server, QARI_DIR: ai.models, QARI_EAGER: '1' });
-  }
   const child = fork(path.join(BACKEND, 'src', 'server.js'), [], { cwd: BACKEND, env, stdio: ['ignore', log, log, 'ipc'], windowsHide: true });
   fs.closeSync(log);
   backend = child;
@@ -95,7 +126,7 @@ async function startBackend() {
   child.once('exit', (code) => {
     exited = true;
     if (backend === child) backend = null;
-    if (!quitting && code !== 0 && win) {
+    if (!quitting && !child.stopping && code !== 0 && win) {
       dialog.showErrorBox('PDF to Word', `توقف الخادم الداخلي للبرنامج بشكل غير متوقع (الرمز ${code}).\nالتفاصيل في:\n${logFile()}`);
     }
   });
@@ -112,11 +143,21 @@ function stopBackend() {
   const child = backend;
   if (!child) return Promise.resolve();
   backend = null;
+  child.stopping = true; // stopped on purpose: no "stopped unexpectedly" message
   return new Promise((resolve) => {
     const timer = setTimeout(() => { child.kill(); resolve(); }, 8000);
     child.once('exit', () => { clearTimeout(timer); resolve(); });
     try { child.send('shutdown'); } catch { child.kill(); }
   });
+}
+
+/** Start the API again (another AI reader) and show it. */
+async function restartBackend() {
+  await stopBackend();
+  const started = await startBackend();
+  origin = started.url;
+  await win?.loadURL(origin);
+  return started.ai;
 }
 
 // ---- offering the AI reader when it is missing ------------------------------------------------------------------------
@@ -129,8 +170,8 @@ function runAiSetup() {
   });
 }
 
-async function offerAi(ai) {
-  if (ai.ready || ai.declined || process.platform !== 'win32') return;
+async function offerAi(ai, { asked = false } = {}) {
+  if (ai.ready || (ai.declined && !asked) || process.platform !== 'win32') return;
   const missing = [];
   if (!ai.server) missing.push('برنامج Ollama (نحو 1.5 جيجابايت)');
   if (!ai.models) missing.push('نموذج القراءة Qari-OCR (نحو 2.9 جيجابايت)');
@@ -138,11 +179,11 @@ async function offerAi(ai) {
     type: 'question',
     title: 'قارئ الذكاء الاصطناعي',
     message: 'قارئ الذكاء الاصطناعي المحلي غير مثب\u0651ت على هذا الجهاز',
-    detail: `ي\u064Fحس\u0651ن قراءة الصفحات الممسوحة كثير\u064Bا ويعمل على جهازك بلا إنترنت بعد التثبيت.\nسي\u064Fنز\u0651ل: ${missing.join('، ')}.\n\nيعمل البرنامج بدونه بالمحرك القياسي.`,
+    detail: `يقرأ الصفحات الممسوحة على جهازك بلا إنترنت بعد التثبيت، بدل Gemini.\nسي\u064Fنز\u0651ل: ${missing.join('، ')}.\n\nحتى يكتمل تثبيته ي\u064Fستخدم المحرك القياسي.`,
     buttons: ['تثبيت الآن', 'لاحق\u064Bا'],
     defaultId: 0,
     cancelId: 1,
-    checkboxLabel: 'لا تسألني مرة أخرى',
+    ...(asked ? {} : { checkboxLabel: 'لا تسألني مرة أخرى' }),
   });
   if (response !== 0) {
     if (checkboxChecked) writeState({ declined: true });
@@ -150,10 +191,91 @@ async function offerAi(ai) {
   }
   const ok = await runAiSetup();
   if (!ok || !aiStatus().ready || quitting) return;
-  await stopBackend(); // start again, this time with the AI
-  const started = await startBackend();
-  origin = started.url;
-  win?.loadURL(origin);
+  await restartBackend(); // start again, this time with the AI
+}
+
+// ---- choosing the AI reader: the "AI" menu -------------------------------------------------------------------------
+let keyWindow = null;
+
+/** The Gemini key window; resolves when it closes. */
+function askGeminiKey() {
+  if (keyWindow) { keyWindow.focus(); return new Promise((resolve) => keyWindow.once('closed', resolve)); }
+  return new Promise((resolve) => {
+    keyWindow = new BrowserWindow({
+      parent: win || undefined,
+      modal: !!win,
+      width: 560,
+      height: 330,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      show: false,
+      title: 'مفتاح Gemini',
+      icon: path.join(__dirname, 'build', 'icon.png'),
+      backgroundColor: '#f8fafc',
+      webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false },
+    });
+    keyWindow.setMenu(null);
+    keyWindow.once('ready-to-show', () => keyWindow.show());
+    keyWindow.webContents.on('will-navigate', (e) => e.preventDefault());
+    keyWindow.on('closed', () => { keyWindow = null; resolve(); });
+    keyWindow.loadFile(path.join(__dirname, 'key.html'));
+  });
+}
+
+ipcMain.handle('gemini-key:info', () => ({ hasKey: !!geminiKey() }));
+ipcMain.handle('gemini-key:save', async (_e, key) => {
+  const k = String(key || '').trim();
+  const r = await checkGeminiKey(k);
+  if (r.ok) saveGeminiKey(k);
+  return r;
+});
+ipcMain.handle('gemini-key:remove', () => saveGeminiKey(''));
+ipcMain.on('gemini-key:close', () => keyWindow?.close());
+ipcMain.on('gemini-key:studio', () => shell.openExternal('https://aistudio.google.com/apikey'));
+
+/** Restarting stops a conversion that is running: asked first. */
+async function confirmRestart() {
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'question',
+    title: 'PDF to Word',
+    message: 'سيُعاد تشغيل المحوّل الآن',
+    detail: 'أي تحويل جارٍ سيتوقف.',
+    buttons: ['متابعة', 'إلغاء'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  return response === 0;
+}
+
+async function chooseReader(local) {
+  if (!!readState().localAi === local) return;
+  if (!(await confirmRestart())) return buildMenu(); // the radio goes back to the reader in use
+  writeState({ localAi: local });
+  if (!local && !geminiKey()) await askGeminiKey();
+  const ai = await restartBackend();
+  buildMenu();
+  if (local) await offerAi(ai, { asked: true });
+}
+
+async function changeGeminiKey() {
+  const before = geminiKey();
+  await askGeminiKey();
+  // the key only matters while Gemini is the reader
+  if (geminiKey() !== before && !readState().localAi) await restartBackend();
+}
+
+function buildMenu() {
+  const local = !!readState().localAi;
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{
+    label: 'الذكاء الاصطناعي',
+    submenu: [
+      { label: 'Google Gemini (عبر الإنترنت)', type: 'radio', checked: !local, click: () => chooseReader(false).catch(() => {}) },
+      { label: 'القارئ المحلي Qari (بلا إنترنت)', type: 'radio', checked: local, click: () => chooseReader(true).catch(() => {}) },
+      { type: 'separator' },
+      { label: 'مفتاح Gemini...', click: () => changeGeminiKey().catch(() => {}) },
+    ],
+  }]));
 }
 
 // ---- window ---------------------------------------------------------------------------------------------------------
@@ -167,7 +289,6 @@ function createWindow() {
     title: 'PDF to Word',
     icon: path.join(__dirname, 'build', 'icon.png'),
     backgroundColor: '#f8fafc',
-    autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
   });
   win.once('ready-to-show', () => win.show());
@@ -193,13 +314,20 @@ if (!app.requestSingleInstanceLock()) {
     if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
   });
   app.whenReady().then(async () => {
-    Menu.setApplicationMenu(null);
+    buildMenu();
     createWindow();
     try {
       const { url, ai } = await startBackend();
       origin = url;
       await win?.loadURL(origin);
-      offerAi(ai).catch(() => {});
+      const saved = readState();
+      if (saved.localAi) offerAi(ai).catch(() => {});
+      else if (!geminiKey() && !saved.keyAsked) {
+        // the first start: Gemini needs a key (asked once; later from the "AI" menu)
+        writeState({ keyAsked: true });
+        await askGeminiKey();
+        if (geminiKey()) await restartBackend();
+      }
     } catch (err) {
       dialog.showErrorBox('PDF to Word', `تعذ\u0651ر تشغيل البرنامج.\n${err.message}`);
       app.quit();

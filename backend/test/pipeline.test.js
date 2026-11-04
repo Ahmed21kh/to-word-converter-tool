@@ -77,3 +77,39 @@ test('Arabic PDF with Quran verses converts to a faithful, ordered docx', { skip
   const i3 = text.indexOf('الفصل 3');
   assert.ok(i1 >= 0 && i1 < i2 && i2 < i3, 'chapters must appear in page order');
 });
+
+test('pages Google could not read are read again with the AI; one that fails again keeps its first reading', async () => {
+  const { rereadMissed, dropPictures } = await import('../src/pipeline/convert-pdf.js');
+  const page = (n, method, warnings = []) => ({ model: { n, method, blocks: [] }, meta: { n, method, warnings } });
+  const results = [
+    page(1, 'ai'),
+    page(2, 'ocr', ['ai-failed-used-standard-ocr:AI reading failed (gemini:{"error":{"code":503']),
+    page(3, 'ocr', ['ai-failed-used-standard-ocr:AI reading failed (gemini:{"error":{"code":504']),
+  ];
+  const calls = [];
+  const phases = [];
+  await rereadMissed({
+    results,
+    pauses: [0, 0],
+    runOnce: async (n, extra) => {
+      calls.push([n, extra.aiRetry]);
+      if (n === 3) throw new Error('AI reading failed again');
+      return page(n, 'ai');
+    },
+    onProgress: (p) => phases.push(p.phase),
+    isCancelled: () => false,
+  });
+  assert.equal(results[1].meta.method, 'ai', 'page 2 is now the AI reading');
+  assert.equal(results[2].meta.method, 'ocr', 'page 3 keeps its OCR reading');
+  assert.deepEqual(calls, [[2, true], [3, true], [3, true]], 'two rounds; only the pages still missing');
+  assert.ok(phases.every((p) => p === 'retrying'));
+
+  // printMatch drops pictures, but not a page that is nothing but its picture (it would come out empty)
+  const pics = [
+    { model: { blocks: [{ type: 'image', fullPage: true }] }, meta: { warnings: ['no-readable-text-kept-as-image'] } },
+    { model: { blocks: [{ type: 'p', runs: [] }, { type: 'image' }] }, meta: { warnings: [] } },
+  ];
+  dropPictures(pics);
+  assert.equal(pics[0].model.blocks.length, 1);
+  assert.deepEqual(pics[1].model.blocks.map((b) => b.type), ['p']);
+});

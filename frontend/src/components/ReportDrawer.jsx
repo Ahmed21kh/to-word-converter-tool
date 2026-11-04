@@ -138,7 +138,7 @@ export default function ReportDrawer({ jobId, name, onClose }) {
                   { title: t('report.chars'), dataIndex: 'chars', width: 64 },
                   { title: t('report.confidence'), width: 64, render: (_, r) => (r.confidence != null ? `${r.confidence}%` : r.quality != null ? `${Math.round(r.quality * 100)}%` : '—') },
                   // long notes wrap inside their cell: the drawer never scrolls sideways
-                  { title: t('report.warnings'), render: (_, r) => <div className="flex flex-wrap gap-1">{(r.warnings || []).map((w) => <Tag key={w} title={w} color={raw(`report.note.${w.split(':')[0]}`) && w.startsWith('front') ? 'default' : 'warning'} className="!m-0 max-w-full !whitespace-normal break-all">{raw(`report.note.${w.split(':')[0]}`) || w}</Tag>)}</div> },
+                  { title: t('report.warnings'), render: (_, r) => <div className="flex flex-wrap gap-1">{(r.warnings || []).map((w) => <Tag key={w} title={w} color={raw(`report.note.${w.split(':')[0]}`) && /^(front|scanned-under)/.test(w) ? 'default' : 'warning'} className="!m-0 max-w-full !whitespace-normal break-all">{raw(`report.note.${w.split(':')[0]}`) || w}</Tag>)}</div> },
                 ]}
               />
             </section>

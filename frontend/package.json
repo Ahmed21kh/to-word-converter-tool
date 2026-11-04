@@ -18,6 +18,7 @@
     "@ant-design/icons": "^6.3.4",
     "@fontsource/cairo": "^5.3.0",
     "antd": "^6.6.7",
+    "pdf-to-word-converter": "file:..",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "react-router-dom": "^7.18.4"

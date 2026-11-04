@@ -31,7 +31,11 @@ If you see *"Port 4100 is already in use"* another copy is running: stop it, or 
 | `DATA_DIR` | `./storage` | uploads / results |
 | `SOFFICE_PATH` | auto-detect | LibreOffice binary (enables `.doc` output and Office/RTF input) |
 | `FRONTEND_DIST` | `../frontend/dist` | built frontend to serve |
-| `VISION_PROVIDER` | *(empty = off)* | `claude` (Anthropic API, needs `ANTHROPIC_API_KEY`), `llamacpp` (local **Qari-OCR**, an Arabic OCR model trained on diacritised text; start it with `scripts/start-qari.ps1`) or `ollama` (a general local model): enables the **AI** reading engine |
+| `VISION_PROVIDER` | *(empty = off)* | `claude` (Anthropic API, needs `ANTHROPIC_API_KEY`), `gemini` (Google Gemini API, needs `GEMINI_API_KEY`), `llamacpp` (local **Qari-OCR**, an Arabic OCR model trained on diacritised text; start it with `scripts/start-qari.ps1`) or `ollama` (a general local model): enables the **AI** reading engine |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | — / `gemini-flash-latest` | key and model for the `gemini` provider (`gemini-2.5-flash` is closed to new keys; a fixed version such as `gemini-3.8-flash` also works) |
+| `GEMINI_FALLBACK_MODEL` | `gemini-flash-lite-latest` | models used once `GEMINI_MODEL`'s quota is used up (comma separated; empty = none). On the free tier `gemini-3.8-flash` allows only 20 requests a day (one per page); a used-up model is not asked again until Google's reset time, and a page no model can read goes to the standard OCR at once |
+| `GEMINI_TIMEOUT_MS` | 75000 | how long one Gemini request may take (kept well inside `PAGE_TIMEOUT_MS`, so a page Gemini is slow on is still read by the standard OCR) |
+| `LOCAL_AI` | 0 | `1` switches the AI engine to the local reader (`LOCAL_AI_PROVIDER`: `llamacpp` by default, or `ollama`) and turns the cloud provider in `VISION_PROVIDER` off |
 | `LLAMA_URL` | `http://127.0.0.1:8081` | where the Qari-OCR server listens (`llamacpp` provider). The API **starts it by itself** (and stops it on exit); a server that is already running is reused |
 | `QARI_DIR` | `E:/ollama/qari` | folder with `model.gguf` and `mmproj.gguf` (use forward slashes in `.env`) |
 | `LLAMA_SERVER_EXE` | *(found next to Ollama)* | path of `llama-server.exe` if it is not found automatically |
@@ -42,7 +46,7 @@ If you see *"Port 4100 is already in use"* another copy is running: stop it, or 
 | `VISION_MODEL` | `claude-opus-5-5` / `qwen2.5vl:7b` | model used by the AI engine (`claude-sonnet-5-5` is about half the price) |
 | `OLLAMA_URL` | `http://localhost:11434` | where Ollama listens |
 | `OLLAMA_NUM_CTX` | 6144 | context size for whole-page reading with the local model (6144 fits an 8 GB GPU entirely; 8192 spills to the CPU and is slower) |
-| `VISION_MODE` | `lines` (Ollama) | `lines` = the local model reads every text line separately (more accurate, tells which words it is unsure about), `page` = one request per page. Claude always reads the whole page |
+| `VISION_MODE` | `lines` (Ollama) | `lines` = the local model reads every text line separately (more accurate, tells which words it is unsure about), `page` = one request per page. Claude and Gemini always read the whole page |
 | `VISION_LINE_PARALLEL` | 8 | text lines of a page sent to the local model at the same time (match `LLAMA_PARALLEL`; with Ollama, `OLLAMA_NUM_PARALLEL`). Lines read at once cost little more than one |
 | `VISION_LINE_MARGIN` / `VISION_LINE_PAD` | 12 / 20 | white space (px) kept above and below each line image. Tighter crops send a quarter fewer image tokens but made Qari drop words (a poetry half-line, a verse start), so they are not the default |
 | `VISION_LINE_SCALE` | 1.0 | enlargement of each line image before the local model reads it. Measured with Qari-OCR on two pages: 1.0 reads 98.4-98.8% of the letters, the old 1.4 only 91.8-98.2%, and is slower: it was trained on normal-size text. (The general Ollama model preferred 1.4) |

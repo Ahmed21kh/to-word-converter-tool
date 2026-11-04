@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { wordConfidence } from '../src/pipeline/token-confidence.js';
 import { cleanArabicLine, groupLines } from '../src/pipeline/vision-ocr.js';
-import { segmentLines } from '../src/pipeline/text-lines.js';
+import { segmentLines, lineOrnament, lineGaps, isolateLine } from '../src/pipeline/text-lines.js';
 import { buildDocx } from '../src/pipeline/docx-builder.js';
 
 const tok = (token, p, alts = []) => {
@@ -67,8 +67,9 @@ test('segmentLines cuts touching lines apart and reports the ink extent', () => 
   const w = 400, h = 300;
   const px = Buffer.alloc(w * h, 255);
   const bar = (y0, y1, x0, x1) => { for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) px[y * w + x] = 0; };
-  bar(20, 70, 50, 350);
-  bar(70, 120, 50, 350); // touches the first one: one tall run that must be split in two
+  bar(20, 66, 50, 350);
+  bar(66, 74, 100, 112); // a descender touches the next line: one tall run that must be split in two
+  bar(74, 120, 50, 350);
   bar(180, 230, 120, 250);
   const lines = segmentLines(px, w, h);
   assert.equal(lines.length, 3);
@@ -153,6 +154,18 @@ test('a long centred line is poetry (centred, body size), a short one a heading;
   }
 });
 
+test('a page the standard OCR read (its sizes from tall line boxes) takes the book body size', async () => {
+  const { unifyAiFontSize } = await import('../src/pipeline/convert-pdf.js');
+  const ai = () => ({ method: 'ai', flow: true, blocks: [{ type: 'p', fs: 15, align: 'both', runs: [{ text: 'نص'.repeat(50), fs: 15 }] }] });
+  const ocr = { method: 'ocr', blocks: [
+    { type: 'p', fs: 22.5, runs: [{ text: 'نص'.repeat(80), fs: 22.5 }] },
+    { type: 'p', fs: 34.5, runs: [{ text: 'عنوان', fs: 34.5 }] },
+    { type: 'p', fs: 7.5, runs: [{ text: 'ـ', fs: 7.5 }] },
+  ] };
+  unifyAiFontSize([ai(), ai(), ocr]);
+  assert.deepEqual(ocr.blocks.map((b) => [b.fs, b.runs[0].fs]), [[15, 15], [19, 19], [9.5, 9.5]]);
+});
+
 test('footnote numbers run 1, 2, 3 and a missing citation number is completed from the identified verse', async () => {
   const { fixNoteNumbers } = await import('../src/pipeline/vision-ocr.js');
   const { guardParagraph } = await import('../src/pipeline/quran.js');
@@ -219,4 +232,133 @@ test('the Qari run plan follows the machine: slots by GPU memory, CPU without a 
   assert.deepEqual(runPlan(null, {}), { gpu: false, parallel: 1 });
   assert.deepEqual(runPlan(8192, { QARI_GPU: '0' }), { gpu: false, parallel: 1 });
   assert.deepEqual(runPlan(4096, { LLAMA_PARALLEL: '3' }), { gpu: true, parallel: 3 });
+});
+
+test('a reader looping on a cycle of words (from a dashed rule) is caught, and the cycle cut to two turns', async () => {
+  const { hasLoop, collapseLoops } = await import('../src/pipeline/vision-ocr.js');
+  assert.equal(hasLoop('م ، م ، م ، م ، م ،'), true);
+  assert.equal(hasLoop('٩٢ ٩٢ ٩٢ ٩٢ ٩٢'), true);
+  assert.equal(hasLoop('قال الشيخ قال الإمام قال'), false, 'a word coming back now and then is not a loop');
+  const w = 'قال م ، م ، م ، م ، م ،'.split(' ').map((text) => ({ text }));
+  assert.deepEqual(collapseLoops(w).map((x) => x.text).join(' '), 'قال م ، م ،');
+});
+
+test('what a reader writes for a picture it cannot read is no text: Markdown images and links to image files go, a website stays', () => {
+  assert.equal(cleanArabicLine('![](https://i.imgur.com/3Q5z6.jpg) ![](https://i.imgur.com/27498.png)', { arabicOnly: false }), '');
+  assert.equal(cleanArabicLine('انظر https://i.imgur.com/10yGq.jpeg هنا', { arabicOnly: false }), 'انظر هنا');
+  assert.equal(cleanArabicLine('الموقع: www.quran.gov.ae', { arabicOnly: false }), 'الموقع: www.quran.gov.ae');
+});
+
+test('a doubtful word is set by the word the book prints elsewhere, through the reader\'s other guesses', async () => {
+  const { fixDoubtfulWords } = await import('../src/pipeline/book-words.js');
+  const para = (runs) => ({ type: 'p', runs });
+  const models = [
+    { blocks: [para([{ text: 'تأليف ' }, { text: 'خَاقَةِ ', lowConf: true, alts: ['خَافَةِ', 'خَاتَةِ'] }, { text: 'المحققين ' }, { text: 'المتوَكَىِّ', lowConf: true, alts: ['المتوَلَىِّ'] }])] },
+    { blocks: [para([{ text: 'الخاتمة: في وقف حمزة للشيخ المتولى خاتم النبيين' }]), para([{ text: 'يحمل ', lowConf: true }, { text: 'قال ', lowConf: true }])] },
+    { blocks: [para([{ text: 'قول المتولى يجمل يكمل' }])] },
+  ];
+  assert.equal(fixDoubtfulWords(models), 2);
+  const runs = models[0].blocks[0].runs;
+  assert.equal(runs[1].text, 'خاتمة ');
+  assert.equal(runs[1].alts[0], 'خَاقَةِ'); // what the reader saw is kept for review
+  assert.equal(runs[3].text, 'المتولى');
+  // a doubtful word with two book words near it, ending alike, is left alone (يحمل: يجمل and يكمل), and so is a word the book has
+  assert.equal(models[1].blocks[1].runs[0].text, 'يحمل ');
+  assert.equal(models[1].blocks[1].runs[1].text, 'قال ');
+});
+
+test('a title page keeps the print showing through from the back of the leaf light: only its ink is made black', async () => {
+  const { enhanceForAi } = await import('../src/pipeline/scan-clean.js');
+  const { default: sharp } = await import('sharp');
+  const w = 400, h = 400;
+  const g = new Uint8Array(w * h).fill(248);
+  // show-through: soft grey letters, about 6% of the page
+  for (let y = 40; y < 360; y += 16) for (let x = 20; x < 380; x += 20) for (let k = 0; k < 25; k++) g[(y + Math.floor(k / 5)) * w + x + (k % 5)] = 212;
+  for (let y = 190; y < 200; y++) for (let x = 120; x < 200; x++) g[y * w + x] = 25; // the title's ink: 0.5% of the page
+  const { data } = await sharp(await enhanceForAi(g, w, h)).greyscale().raw().toBuffer({ resolveWithObject: true });
+  assert.ok(data[195 * w + 160] < 60, 'ink stays black');
+  assert.ok(data[42 * w + 22] > 150, `show-through stays light (${data[42 * w + 22]})`);
+});
+
+test('lineOrnament finds a flower (❋) opening a line, not a round letter of its size', () => {
+  const w = 400;
+  const h = 60;
+  // a line 10..60 high: a mark 24 px wide at its right end, a gap, then a word (a bar of ink)
+  const page = (mark) => {
+    const g = new Uint8Array(w * h).fill(255);
+    for (let y = 25; y < 35; y++) for (let x = 40; x < 330; x++) g[y * w + x] = 0;
+    for (let y = 0; y < 24; y++) for (let x = 0; x < 24; x++) if (mark(x - 11.5, y - 11.5)) g[(18 + y) * w + 350 + x] = 0;
+    return g;
+  };
+  const box = { x0: 40, x1: 374, y0: 8, y1: 58 };
+  // eight petals round a solid centre
+  const flower = (dx, dy) => { const r = Math.hypot(dx, dy); const t = Math.atan2(dy, dx); return r < 4 || r < 12 * (0.55 + 0.45 * Math.cos(8 * t)); };
+  const ring = (dx, dy) => { const r = Math.hypot(dx, dy); return r > 6 && r < 12; };
+  const cut = lineOrnament(page(flower), w, h, box);
+  assert.ok(cut !== null && cut > 330 && cut < 350, `cut ${cut}`);
+  assert.equal(lineOrnament(page(ring), w, h, box), null);
+});
+
+test('fixDotSlips sets a word read with a wrong dot by the book’s own words, and leaves real words alone', async () => {
+  const { fixDotSlips } = await import('../src/pipeline/book-words.js');
+  const p = (text, extra = {}) => ({ type: 'p', ai: true, runs: [{ text, lowConf: false, ...extra }] });
+  const models = [
+    { blocks: [p('قرأ حمزة وقف حمزة على حمزة'), p('قال يكون ثم يكون ثم يكون')] },
+    // a slip (ز read ر), a real word one dot from a common one (تكون / يكون), a verse, and a page from a PDF's text layer
+    { blocks: [p('وقرأ حمرة كذلك'), p('أن تكون'), p('﴿حمرة﴾', { verse: true }), { type: 'p', runs: [{ text: 'حمرة', lowConf: false }] }] },
+  ];
+  assert.equal(fixDotSlips(models), 1);
+  assert.equal(models[1].blocks[0].runs[0].text, 'وقرأ حمزة كذلك');
+  assert.equal(models[1].blocks[1].runs[0].text, 'أن تكون');
+  assert.equal(models[1].blocks[2].runs[0].text, '﴿حمرة﴾');
+  assert.equal(models[1].blocks[3].runs[0].text, 'حمرة');
+});
+
+test('lineNumbers reads a year by the shapes of its digits', async (t) => {
+  const { createCanvas, GlobalFonts } = await import('@napi-rs/canvas');
+  if (!GlobalFonts.families.some((f) => f.family === 'Traditional Arabic')) return t.skip('no Arabic font to draw with');
+  const { lineNumbers } = await import('../src/pipeline/page-digits.js');
+  const w = 600;
+  const h = 80;
+  const c = createCanvas(w, h);
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#000';
+  ctx.font = '40px "Traditional Arabic"';
+  ctx.direction = 'rtl';
+  ctx.fillText('توفي سنة ١٢٩٣ هـ', 560, 55);
+  const px = ctx.getImageData(0, 0, w, h).data;
+  const gray = new Uint8Array(w * h);
+  for (let i = 0; i < gray.length; i++) gray[i] = px[i * 4];
+  // the line's box as segmentLines gives it: the rows its ink spans
+  const rows = [...Array(h).keys()].filter((y) => gray.subarray(y * w, (y + 1) * w).some((v) => v < 140));
+  const found = await lineNumbers(gray, w, h, { x0: 0, x1: w, y0: rows[0], y1: rows[rows.length - 1] + 1 });
+  assert.deepEqual(found.map((n) => n.text), ['١٢٩٣']);
+});
+
+test('lineGaps finds the gap between a verse’s two halves, not the spaces between words nor a speck at the edge', () => {
+  const w = 900;
+  const h = 60;
+  const g = new Uint8Array(w * h).fill(255);
+  const ink = (x0, x1) => { for (let y = 15; y < 45; y++) for (let x = x0; x < x1; x++) g[y * w + x] = 0; };
+  // words 15 px apart, then a 120 px gap, then more words; a speck far to the left
+  ink(500, 600); ink(615, 700); ink(715, 800);
+  ink(250, 350); ink(365, 380);
+  ink(20, 23);
+  const gaps = lineGaps(g, w, { x0: 20, x1: 800, y0: 10, y1: 50 });
+  assert.deepEqual(gaps, [{ x0: 380, x1: 499 }]);
+});
+
+test('isolateLine keeps the line and its margin, without the pieces of the lines above and below', () => {
+  const w = 100;
+  const h = 60;
+  const g = new Uint8Array(w * h).fill(255);
+  for (let x = 10; x < 90; x++) for (let y = 25; y < 35; y++) g[y * w + x] = 0; // the line (rows 20-40)
+  for (let x = 30; x < 40; x++) for (let y = 12; y < 16; y++) g[y * w + x] = 0; // a tail of the line above, in the margin
+  for (let x = 50; x < 55; x++) for (let y = 16; y < 30; y++) g[y * w + x] = 0; // the line's own mark, rising into the margin
+  const out = isolateLine(g, w, { x0: 0, x1: w, y0: 20, y1: 40 }, 0, w, 8, 52);
+  assert.equal(out[(14 - 8) * w + 35], 255);
+  assert.equal(out[(18 - 8) * w + 52], 0);
+  assert.equal(out[(30 - 8) * w + 50], 0);
 });

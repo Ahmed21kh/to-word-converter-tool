@@ -32,8 +32,10 @@ services:
         value: "100"
       - key: RETENTION_MINUTES
         value: "60"
-      # AI reading: the local Qari model cannot run on Render. Leave empty for the free OCR, or set "claude" with an API key
+      # AI reading: the local Qari model cannot run on Render. Leave empty for the free OCR, or set "claude" / "gemini" with its API key
       - key: VISION_PROVIDER
         sync: false
       - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
         sync: false

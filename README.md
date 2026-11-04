@@ -58,9 +58,19 @@ Free OCR reads diacritised Arabic books at roughly 86% letter accuracy (about 60
 ```bash
 # Anthropic API (official SDK). Page images are sent to Anthropic; billed per use.
 VISION_PROVIDER=claude  ANTHROPIC_API_KEY=sk-ant-...  npm start
+# Google Gemini API (official @google/genai SDK). Page images are sent to Google; the default model is gemini-flash-latest
+VISION_PROVIDER=gemini  GEMINI_API_KEY=...  GEMINI_MODEL=gemini-flash-latest  npm start
 # or a local model with Ollama (free; needs a capable GPU for speed)
 VISION_PROVIDER=ollama  VISION_MODEL=qwen2.5vl:7b  npm start
 ```
+
+Only one reader is used at a time. With a cloud provider set, `LOCAL_AI=1` switches to the local reader (`LOCAL_AI_PROVIDER`,
+`llamacpp` = Qari-OCR by default, or `ollama`) and turns the cloud one off; `LOCAL_AI=0` (or unset) goes back to the cloud
+provider. The Qari server is only started while the local reader is on. Gemini, like Claude, reads the whole page in one request;
+a page Gemini holds back (a safety stop, or "recitation" on a long Quran passage) counts as declined and falls back like any other.
+On Google's free tier `gemini-3.8-flash` (what `gemini-flash-latest` points to) allows only 20 requests a day, one per page:
+once it is used up the converter switches to `GEMINI_FALLBACK_MODEL` (`gemini-flash-lite-latest` by default), and when that is
+used up too the remaining pages go straight to the free OCR. Enable billing on the key's project for whole books.
 
 Then choose **Reading engine → AI** in the options. If the AI is unavailable, declines a page, or errors, that page automatically falls back to the free engine, so a page is never lost. The Quran guard still verifies the AI's text. The AI path is tested against a mock of the API; it has **not** been run against the real service from this repository (no key), so measure it on your own pages first.
 
@@ -115,7 +125,7 @@ Both deploy from this GitHub repository; push first.
 1. **API on Render**: New > Blueprint > this repository ([render.yaml](render.yaml)). When asked, set `CORS_ORIGINS` to the
    Vercel address (e.g. `https://your-site.vercel.app`, no trailing slash) and `PUBLIC_URL` to the Render address
    (e.g. `https://pdf2word-api.onrender.com`). Leave `VISION_PROVIDER` empty for the free OCR, or set `claude` and
-   `ANTHROPIC_API_KEY` (the local Qari model cannot run on Render). Check `https://<api>/api/health`.
+   `ANTHROPIC_API_KEY`, or `gemini` and `GEMINI_API_KEY` (the local Qari model cannot run on Render). Check `https://<api>/api/health`.
 2. **Site on Vercel**: Add New > Project > this repository, **Root Directory `frontend`** (build settings come from
    [frontend/vercel.json](frontend/vercel.json)). Environment variables: `VITE_API_URL` = the Render address,
    `VITE_SITE_URL` = the Vercel address. Both are built into the pages, so redeploy after changing them.

@@ -7,7 +7,7 @@ import {
   CommentRangeStart, CommentRangeEnd, CommentReference, BorderStyle, Tab, TabStopType,
 } from 'docx';
 import { ARABIC_ANY, ARABIC_LETTER, UNMAPPED } from './arabic.js';
-import { fitPage } from './page-fit.js';
+import { fitPage, bookGrowth } from './page-fit.js';
 
 const TW = 20; // twips per point
 const tw = (pt) => Math.max(0, Math.round(pt * TW));
@@ -82,8 +82,8 @@ function runsToTextRuns(runs, par, o) {
     for (const seg of segmentText(r.text, rtlPar)) {
       const isAr = seg.kind === 'ar' || (seg.kind === 'bad' && rtlPar);
       const fontName = isAr ? o.arabicFont : o.latinFont;
-      // a page shrunk to fit (printMatch) rounds down, never past the size that was measured to fit
-      const size = o.fsScale < 1 ? Math.max(2, Math.floor((r.fs || par.fs || 12) * o.fsScale * 2)) : hp(r.fs || par.fs || 12);
+      // a page fitted to its page (printMatch) rounds down, never past the size that was measured to fit
+      const size = o.fsScale ? Math.max(2, Math.floor((r.fs || par.fs || 12) * o.fsScale * 2)) : hp(r.fs || par.fs || 12);
       const bad = seg.kind === 'bad';
       out.push(new TextRun({
         text: seg.text,
@@ -106,7 +106,7 @@ function runsToTextRuns(runs, par, o) {
 }
 
 function headingFor(par, bodyFs, o) {
-  if (!o.detectHeadings || !par.fs || !bodyFs) return undefined;
+  if (!o.detectHeadings || par.noHeading || !par.fs || !bodyFs) return undefined;
   const len = par.runs.reduce((s, r) => s + r.text.length, 0);
   if (par.lineCount > 2 || len > 140 || len < 2) return undefined;
   const ratio = par.fs / bodyFs;
@@ -177,39 +177,7 @@ async function buildImage(block, contentW, o, region) {
   });
 }
 
-// the box around a cover / title page read as text (printMatch): its padding, and the gap between its lines
-const CARD_PAD = { top: 8, bottom: 8, side: 10 };
-const CARD_GAP = 4;
-const CARD_BORDER = { style: BorderStyle.SINGLE, size: 12, color: '1F3864' };
-
-/** A cover / title page read as text: its lines centred in a bordered box, as Shamela shows a book's card. */
-function buildCard(block, ctx) {
-  const w = tw(block.colWidths[0]);
-  // the title of a cover is not a heading of the book (it would show up in its table of contents)
-  const o = { ...ctx.o, detectHeadings: false };
-  const paras = block.cells[0].paras.map((p, i) => buildParagraph(p, { ...ctx, o, spaceBefore: i ? CARD_GAP : 0 }));
-  const border = { top: CARD_BORDER, bottom: CARD_BORDER, left: CARD_BORDER, right: CARD_BORDER };
-  return new Table({
-    rows: [new TableRow({
-      children: [new TableCell({
-        width: { size: w, type: WidthType.DXA },
-        margins: { top: tw(CARD_PAD.top), bottom: tw(CARD_PAD.bottom), left: tw(CARD_PAD.side), right: tw(CARD_PAD.side) },
-        borders: border,
-        shading: { fill: 'EAF0FA', color: 'auto', type: 'clear' },
-        children: paras,
-      })],
-    })],
-    columnWidths: [w],
-    width: { size: w, type: WidthType.DXA },
-    layout: TableLayoutType.FIXED,
-    visuallyRightToLeft: true,
-    alignment: AlignmentType.CENTER,
-    borders: { ...border, insideHorizontal: CARD_BORDER, insideVertical: CARD_BORDER },
-  });
-}
-
 function buildTable(block, ctx) {
-  if (block.card) return buildCard(block, ctx);
   const { contentW } = ctx;
   const totalPt = block.colWidths.reduce((a, b) => a + b, 0);
   const scale = Math.min(1, contentW / Math.max(1, totalPt));
@@ -263,13 +231,10 @@ function documentBodySize(pages) {
   return best;
 }
 
-async function buildSection(page, bodyFs, o) {
-  const { width, height, blocks, margins } = page;
+/** Where each block of a page goes: the space above a paragraph reproduces the gap between the printed lines. */
+function layoutOf(page) {
+  const { width, blocks, margins } = page;
   const contentW = width - margins.left - margins.right;
-  const children = [];
-  const region = { x0: margins.left, x1: width - margins.right };
-
-  // where each block goes: the space above a paragraph reproduces the gap between the printed lines
   const layout = [];
   let prev = null; // {bottom} in points
   for (const b of blocks) {
@@ -281,11 +246,6 @@ async function buildSection(page, bodyFs, o) {
       else before = Math.max(0, b.firstBaseline - lh * 0.8 - margins.top);
       layout.push({ block: b, before: Math.min(before, 220), lineGap: lineGapOf(b) });
       if (b.lastBaseline != null) prev = { bottom: b.lastBaseline + lh * 0.2 };
-    } else if (b.type === 'table' && b.card) {
-      // its lines are text like any other: the page fit may make them smaller
-      const width = b.colWidths[0] - CARD_PAD.side * 2;
-      const inner = b.cells[0].paras.map((p, i) => ({ block: p, before: i ? CARD_GAP : 0, lineGap: lineGapOf(p), width }));
-      layout.push({ block: b, inner, height: CARD_PAD.top + CARD_PAD.bottom + 6 }); // + borders and the paragraph after the table
     } else if (b.type === 'table') {
       layout.push({ block: b, height: (b.rowHeights || []).reduce((a, h) => a + h, 0) + 1 });
       prev = { bottom: b.bbox.y1 };
@@ -294,11 +254,21 @@ async function buildSection(page, bodyFs, o) {
       prev = { bottom: b.bbox.y1 };
     }
   }
+  return layout;
+}
 
-  // printMatch: shrink this page's text until it is sure to stay one Word page
+async function buildSection(page, bodyFs, o) {
+  const { width, height, margins } = page;
+  const contentW = width - margins.left - margins.right;
+  const children = [];
+  const region = { x0: margins.left, x1: width - margins.right };
+  const layout = layoutOf(page);
+
+  // printMatch: the book's text a little larger where the page has room for it (o.grow), and shrunk until it is sure to stay one
+  // Word page where it has not
   const fit = o.printMatch ? await fitPage(page, layout, o) : { scale: 1, spacing: 1 };
   if (fit.scale < 1 || fit.spacing < 1) o.fitted.push({ n: page.n, scale: fit.scale, spacing: fit.spacing });
-  const po = fit.scale < 1 ? { ...o, fsScale: fit.scale } : o;
+  const po = fit.scale !== 1 ? { ...o, fsScale: fit.scale } : o;
   const ctxBase = { o: po, bodyFs, contentW, spacingScale: fit.spacing };
 
   for (const it of layout) {
@@ -339,6 +309,8 @@ async function buildSection(page, bodyFs, o) {
 export async function buildDocx(pages, opts) {
   const o = { ...opts, comments: [], fitted: [] };
   const bodyFs = documentBodySize(pages);
+  // printMatch: as much larger as the book's full pages have room for, the same on every page (and at most a little)
+  if (o.printMatch) o.grow = await bookGrowth(pages.map((p) => ({ page: p, layout: layoutOf(p) })), o);
   const sections = [];
   for (const p of pages) sections.push(await buildSection(p, bodyFs, o));
   const headingRun = (size) => ({ size, bold: false, color: '000000', font: fontSet(o.arabicFont) });

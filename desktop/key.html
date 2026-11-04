@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>مفتاح Gemini</title>
+<style>
+  :root { --bg: #f8fafc; --card: #fff; --text: #0f172a; --muted: #64748b; --line: #cbd5e1; --accent: #2563eb; --err: #dc2626; --ok: #15803d; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f172a; --card: #1e293b; --text: #e2e8f0; --muted: #94a3b8; --line: #334155; --accent: #3b82f6; --err: #f87171; --ok: #4ade80; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px 24px; background: var(--bg); color: var(--text); font: 14px/1.7 "Segoe UI", Tahoma, sans-serif; }
+  h1 { font-size: 17px; margin: 0 0 6px; }
+  p { margin: 0 0 12px; color: var(--muted); }
+  a { color: var(--accent); cursor: pointer; }
+  input { width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); font: 14px Consolas, monospace; direction: ltr; }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row { display: flex; gap: 8px; margin-top: 14px; }
+  button { padding: 8px 18px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { margin-inline-start: auto; color: var(--err); }
+  button:disabled { opacity: .6; cursor: default; }
+  #msg { min-height: 24px; margin-top: 10px; font-size: 13px; }
+  #msg.err { color: var(--err); }
+  #msg.ok { color: var(--ok); }
+</style>
+</head>
+<body>
+  <h1>مفتاح Google Gemini</h1>
+  <p>يقرأ Gemini الصفحات الممسوحة بدقة أعلى بكثير من المحرك القياسي. ت&#x064F;رسل صور هذه الصفحات إلى Google عند اختيار محرك الذكاء الاصطناعي.
+    يمكنك إنشاء مفتاح من <a id="studio">Google AI Studio</a>. ي&#x064F;حفظ المفتاح على هذا الجهاز فقط، مشف&#x0651;ر&#x064B;ا.</p>
+  <input id="key" type="password" placeholder="الصق المفتاح هنا" autocomplete="off" spellcheck="false">
+  <div id="msg"></div>
+  <div class="row">
+    <button id="save" class="primary">حفظ</button>
+    <button id="cancel">إلغاء</button>
+    <button id="remove" class="danger" hidden>حذف المفتاح</button>
+  </div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const say = (text, cls = '') => { $('msg').textContent = text; $('msg').className = cls; };
+  window.geminiKey.info().then(({ hasKey }) => {
+    $('remove').hidden = !hasKey;
+    if (hasKey) $('key').placeholder = 'يوجد مفتاح محفوظ؛ الصق مفتاحًا جديدًا لاستبداله';
+  });
+  $('studio').onclick = () => window.geminiKey.openStudio();
+  $('cancel').onclick = () => window.geminiKey.close();
+  $('remove').onclick = async () => { await window.geminiKey.remove(); window.geminiKey.close(); };
+  async function save() {
+    const key = $('key').value.trim();
+    if (!key) { say('الصق المفتاح أولاً.', 'err'); return; }
+    $('save').disabled = true;
+    say('جارٍ التحقق من المفتاح...');
+    const r = await window.geminiKey.save(key);
+    $('save').disabled = false;
+    if (!r.ok) { say('رفضت Google هذا المفتاح. تأكد منه وحاول مرة أخرى.', 'err'); return; }
+    say(r.unchecked ? 'حُفظ المفتاح (تعذّر التحقق منه الآن: لا اتصال بالإنترنت أو الخدمة مشغولة).' : 'تم الحفظ.', 'ok');
+    setTimeout(() => window.geminiKey.close(), r.unchecked ? 2200 : 600);
+  }
+  $('save').onclick = save;
+  $('key').addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') window.geminiKey.close(); });
+  $('key').focus();
+</script>
+</body>
+</html>

@@ -12,7 +12,7 @@ const PreviewDrawer = lazy(() => import('./PreviewDrawer.jsx'));
 
 const DEFAULT_OPTIONS = {
   format: 'docx', mode: 'smart', language: 'ar', engine: 'standard', quran: 'correct',
-  highlightUncertain: false, detectHeadings: true, frontAsPictures: true, printMatch: false, arabicFont: 'Traditional Arabic',
+  highlightUncertain: false, detectHeadings: true, frontAsPictures: true, printMatch: false, aiBatch: false, arabicFont: 'Traditional Arabic',
 };
 const FALLBACK_CAPS = {
   accept: ['.pdf', '.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.bmp', '.gif', '.txt', '.md', '.csv'],
@@ -121,10 +121,18 @@ export default function ConverterCard({ onCapabilities }) {
         </Radio.Group>
         {options.engine === 'ai' && ai?.available && (
           <p className="mb-0 mt-2 text-xs leading-6 text-amber-700 dark:text-amber-400">
-            {ai.external ? t('converter.options.engineAiHintExternal') : t('converter.options.engineAiHintLocal')}
+            {ai.external ? t('converter.options.engineAiHintExternal', { service: ai.provider === 'gemini' ? 'Google Gemini' : 'Anthropic' }) : t('converter.options.engineAiHintLocal')}
           </p>
         )}
         {!ai?.available && <p className="mb-0 mt-2 text-xs text-slate-500">{t('converter.options.engineAiUnavailable')}</p>}
+        {options.engine === 'ai' && ai?.provider === 'gemini' && (
+          <Tooltip title={t('converter.options.aiBatchHint')}>
+            <label className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+              <span className="font-semibold">{t('converter.options.aiBatch')}</span>
+              <Switch checked={!!options.aiBatch} onChange={(v) => setOpt('aiBatch', v)} />
+            </label>
+          </Tooltip>
+        )}
       </div>
 
       <div>
