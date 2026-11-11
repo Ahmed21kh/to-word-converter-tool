@@ -32,9 +32,12 @@ If you see *"Port 4100 is already in use"* another copy is running: stop it, or 
 | `SOFFICE_PATH` | auto-detect | LibreOffice binary (enables `.doc` output and Office/RTF input) |
 | `FRONTEND_DIST` | `../frontend/dist` | built frontend to serve |
 | `VISION_PROVIDER` | *(empty = off)* | `claude` (Anthropic API, needs `ANTHROPIC_API_KEY`), `gemini` (Google Gemini API, needs `GEMINI_API_KEY`), `llamacpp` (local **Qari-OCR**, an Arabic OCR model trained on diacritised text; start it with `scripts/start-qari.ps1`) or `ollama` (a general local model): enables the **AI** reading engine |
-| `GEMINI_API_KEY` / `GEMINI_MODEL` | — / `gemini-flash-latest` | key and model for the `gemini` provider (`gemini-2.5-flash` is closed to new keys; a fixed version such as `gemini-3.8-flash` also works) |
-| `GEMINI_FALLBACK_MODEL` | `gemini-flash-lite-latest` | models used once `GEMINI_MODEL`'s quota is used up (comma separated; empty = none). On the free tier `gemini-3.8-flash` allows only 20 requests a day (one per page); a used-up model is not asked again until Google's reset time, and a page no model can read goes to the standard OCR at once |
-| `GEMINI_TIMEOUT_MS` | 75000 | how long one Gemini request may take (kept well inside `PAGE_TIMEOUT_MS`, so a page Gemini is slow on is still read by the standard OCR) |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | — / `gemini-3.8-flash` | key and model for the `gemini` provider. Use a fixed version: an alias such as `gemini-flash-latest` moves to a new model (with its own quota) without notice. `gemini-2.5-flash` and `gemini-2.5-flash-lite` answer 404 to new keys |
+| `GEMINI_FALLBACK_MODEL` | `gemini-3.5-flash-lite` | models asked after `GEMINI_MODEL` (comma separated; empty = none): **at once** when a model is overloaded (503), gives no answer within `GEMINI_TIMEOUT_MS` or the connection fails, and in turn on the next retries; a model whose daily quota is used up is left out until Google's reset time. On the free tier each model allows only 20 requests a day (a page is one request, three with `printMatch`, which also reads the running heads) |
+| `GEMINI_TIMEOUT_MS` | 60000 | how long one Gemini request may take (a page answers in 10-20 s; past this the next model is asked) |
+| `GEMINI_CONCURRENCY` | 3 | Gemini requests in flight at once, **for the whole server** (every page worker and every job share one counter in shared memory): 3 suits the free tier, 10 and up a paid key. Pages are read by `WORKERS` threads, so raise `WORKERS` too for more than a few at once |
+| `GEMINI_RPM` | *(none)* | Gemini request starts per minute, spaced evenly across the server (the free tier allows about 10-15 a minute; set it to stay under your key's limit instead of meeting 429s) |
+| `GEMINI_RETRIES` / `GEMINI_RETRY_PAUSE_MS` | 2 / 2000 | how often a Gemini request is asked again after an overload (503), a slow answer (504), a dropped connection or a per-minute limit, and the first pause (doubled each time, up to twice that at random; only a return to the first model of the chain waits). A per-minute 429 holds every Gemini request of the server for as long as Google asks. All of it ends within `GEMINI_RETRY_BUDGET_MS` (60000), so a page that still fails is read by the standard OCR in time (it is not read again at the end of the job) |
 | `LOCAL_AI` | 0 | `1` switches the AI engine to the local reader (`LOCAL_AI_PROVIDER`: `llamacpp` by default, or `ollama`) and turns the cloud provider in `VISION_PROVIDER` off |
 | `LLAMA_URL` | `http://127.0.0.1:8081` | where the Qari-OCR server listens (`llamacpp` provider). The API **starts it by itself** (and stops it on exit); a server that is already running is reused |
 | `QARI_DIR` | `E:/ollama/qari` | folder with `model.gguf` and `mmproj.gguf` (use forward slashes in `.env`) |
@@ -45,7 +48,7 @@ If you see *"Port 4100 is already in use"* another copy is running: stop it, or 
 | `QARI_EAGER` | 0 | `1` starts the Qari server together with the API instead of at the first AI job |
 | `VISION_MODEL` | `claude-opus-5-5` / `qwen2.5vl:7b` | model used by the AI engine (`claude-sonnet-5-5` is about half the price) |
 | `OLLAMA_URL` | `http://localhost:11434` | where Ollama listens |
-| `OLLAMA_NUM_CTX` | 6144 | context size for whole-page reading with the local model (6144 fits an 8 GB GPU entirely; 8192 spills to the CPU and is slower) |
+| `OLLAMA_NUM_CTX` | 6144 | context size for whole-page reading with the local model, only with `VISION_MODE=page` (6144 fits an 8 GB GPU entirely; 8192 spills to the CPU and is slower) |
 | `VISION_MODE` | `lines` (Ollama) | `lines` = the local model reads every text line separately (more accurate, tells which words it is unsure about), `page` = one request per page. Claude and Gemini always read the whole page |
 | `VISION_LINE_PARALLEL` | 8 | text lines of a page sent to the local model at the same time (match `LLAMA_PARALLEL`; with Ollama, `OLLAMA_NUM_PARALLEL`). Lines read at once cost little more than one |
 | `VISION_LINE_MARGIN` / `VISION_LINE_PAD` | 12 / 20 | white space (px) kept above and below each line image. Tighter crops send a quarter fewer image tokens but made Qari drop words (a poetry half-line, a verse start), so they are not the default |
@@ -53,7 +56,9 @@ If you see *"Port 4100 is already in use"* another copy is running: stop it, or 
 | `VISION_IMAGE_DPI` | 200 | resolution the page is rendered at for the AI engine |
 | `AI_FLAG_CONF` | 0.5 | words the AI reading is less sure about than this are highlighted yellow in Word, with the other possible spellings in a Word comment |
 | `VISION_TIMEOUT_MS` | 170000 | how long one AI page request may take |
-| `AI_CONCURRENCY` | 2 (Ollama) / 4 (Claude) | AI pages processed at the same time (a local model answers one at a time) |
+| `AI_CONCURRENCY` | 2 (Ollama) / 4 (Claude) / `GEMINI_CONCURRENCY` (Gemini) | AI pages of one job processed at the same time (a local model answers one at a time) |
+| `LOCAL_AI_CONCURRENCY` | `OLLAMA_NUM_PARALLEL` or 3 (Ollama) / `LLAMA_PARALLEL` or 8 (Qari) | requests sent to the local reader at once, server-wide (all jobs and page workers). The others wait in the API, not in the server's queue, so a line's time limit only counts its own reading: set it to the server's parallel slots |
+| `OLLAMA_KEEP_ALIVE` | 30m | how long Ollama keeps the model in GPU memory after the last request (Ollama's own default, 5m, reloads it between jobs). Every Ollama request asks for the same 2048-token context, so the model is never reloaded mid-book |
 | `PUBLIC_URL` | *(empty)* | public **https** address of the site, e.g. `https://pdf.example.com`. Turns on the optional **Word view (Microsoft)** tab in the preview: Microsoft's online viewer opens the converted file from `PUBLIC_URL/api/jobs/<id>/document.docx`. Read-only, sends the document to Microsoft, and does not work on `localhost` or private addresses. |
 
 ## API

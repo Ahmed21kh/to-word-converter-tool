@@ -202,8 +202,22 @@ export async function lineNumbers(gray, w, h, box) {
     // lead: how far the digit's shape is from the next digit's
     best.set(c, { ...ranked[0], lead: ranked[0].score - ranked[1].score });
   }
+  // what stands between two numbers of a reference: a slash ("١٠/١٢٥", a slanted stroke taller than the digits) or a dash
+  // ("١٤٢ـ١٦٧", flat, on their baseline or half-way up)
+  const slant = (c) => {
+    const meanX = (ya, yb) => { let s = 0; let n = 0; for (let y = ya; y < yb; y++) for (let x = c.x0; x <= c.x1; x++) if (own(c)(x, y)) { s += x; n++; } return n ? s / n : 0; };
+    const q = Math.max(1, c.h >> 2);
+    return (meanX(c.y0, c.y0 + q) - meanX(c.y1 + 1 - q, c.y1 + 1)) / c.w;
+  };
+  const separator = (c, seed) => {
+    if (best.has(c) && best.get(c).score >= 0.65) return null;
+    const mid = ((c.y0 + c.y1) / 2 - seed.y0) / seed.h;
+    if (c.h <= seed.h * 0.3 && c.w >= seed.h * 0.35 && c.w <= seed.h * 1.5 && c.w >= c.h * 2.5 && mid >= 0.3 && mid <= 1.15) return mid >= 0.75 ? 'ـ' : '-';
+    if (c.h >= seed.h * 1.1 && c.h <= seed.h * 1.8 && c.w / c.h >= 0.2 && c.w / c.h <= 0.6 && mid >= 0.3 && mid <= 0.7 && slant(c) >= 0.35) return '/';
+    return null;
+  };
   const used = new Set();
-  const out = [];
+  const pieces = [];
   const seeds = [...best].filter(([, b]) => b.score >= 0.65).map(([c]) => c).sort((a, b) => best.get(b).score - best.get(a).score);
   for (const seed of seeds) {
     if (used.has(seed)) continue;
@@ -212,13 +226,15 @@ export async function lineNumbers(gray, w, h, box) {
     // in the band of the seed (some digits are shorter than the others: ٥), fitting a digit at all
     const digit = (c) => best.has(c) && best.get(c).score >= 0.35 && c.y0 >= band0 && c.y1 <= band1 && c.h >= seed.h * 0.45;
     const zero = (c) => {
-      // about a sixth of a digit's ink (a speck of the scan is a twentieth)
-      if (best.has(c) || c.h >= seed.h * 0.5 || c.area < seed.area * 0.1 || c.w / c.h > 1.8 || c.h / c.w > 1.8) return false;
+      // about a sixth of a digit's ink (a speck of the scan is a twentieth), round or a little taller than wide (the ٠ of "١٠/١٢٥")
+      if (best.has(c) || c.h >= seed.h * 0.5 || c.area < seed.area * 0.1 || c.w / c.h > 1.8 || c.h / c.w > 2.2) return false;
       const mid = ((c.y0 + c.y1) / 2 - seed.y0) / seed.h;
       return mid >= 0.25 && mid <= 0.8;
     };
-    // some books space a year's digits widely (٢ ٠ ٠ ٢)
-    const near = (a, b) => Math.max(a.x0, b.x0) - Math.min(a.x1, b.x1) <= seed.h;
+    // some books space a year's digits widely (٢ ٠ ٠ ٢); a slash or a dash between two digits parts two numbers
+    const seps = parts.filter((c) => separator(c, seed));
+    const near = (a, b) => Math.max(a.x0, b.x0) - Math.min(a.x1, b.x1) <= seed.h
+      && !seps.some((s) => s.x0 >= Math.min(a.x1, b.x1) && s.x1 <= Math.max(a.x0, b.x0));
     const run = [seed];
     for (let grew = true; grew;) {
       grew = false;
@@ -240,14 +256,34 @@ export async function lineNumbers(gray, w, h, box) {
     while (run.length && odd(run[run.length - 1])) run.pop();
     // dots that go on past the number are a row of leader dots (a table of contents), not zeros
     const more = run.length && parts.some((c) => !run.includes(c) && zero(c) && near(c, run[run.length - 1]));
-    // and a dot after two digits is a full stop as often as a zero ("٢٤."); after a year's three it is its zero (١٢٥٠)
-    if (more || run.filter((c) => best.has(c)).length < 3) while (run.length && !best.has(run[run.length - 1])) run.pop();
-    // a year or a date: three digits or more, each plainly the digit it is taken for (an upright stroke alone, alif or lam,
-    // fits ١ as well as ١ does: one digit at least is another)
+    // and a dot after two digits is a full stop as often as a zero ("٢٤."), unless it stands half-way up the digits, where a zero
+    // stands (٨٥٠: 0.45 of their height) and no full stop does (on the line); after a year's three it is its zero (١٢٥٠)
+    const halfUp = (c) => { const mid = ((c.y0 + c.y1) / 2 - seed.y0) / seed.h; return mid >= 0.3 && mid <= 0.62; };
+    if (more) while (run.length && !best.has(run[run.length - 1])) run.pop();
+    if (run.filter((c) => best.has(c)).length < 3) while (run.length && !best.has(run[run.length - 1]) && !halfUp(run[run.length - 1])) run.pop();
+    // each digit plainly the digit it is taken for (an upright stroke alone, alif or lam, fits ١ as well as ١ does)
     const digits = run.filter((c) => best.has(c));
-    if (run.length < 3 || digits.some((c) => best.get(c).score < 0.5 || best.get(c).lead < 0.05)) continue;
-    if (!digits.some((c) => best.get(c).digit !== 1 && best.get(c).score >= 0.65)) continue;
-    out.push({ x0: run[0].x0, x1: run[run.length - 1].x1, text: run.map((c) => DIGITS[best.has(c) ? best.get(c).digit : 0]).join('') });
+    if (!digits.length || digits.some((c) => best.get(c).score < 0.5 || best.get(c).lead < 0.05)) continue;
+    pieces.push({ x0: run[0].x0, x1: run[run.length - 1].x1, seed, run, text: run.map((c) => DIGITS[best.has(c) ? best.get(c).digit : 0]).join('') });
   }
+  // a reference's two numbers, the slash or the dash between them and nothing else: "١٠/١٢٥" (the volume and its page) is
+  // written as printed, left to right, as the slash keeps it; a range "١٤٢ـ١٦٧" from its right number, as it is read
+  pieces.sort((a, b) => a.x0 - b.x0);
+  const joined = [];
+  for (const p of pieces) {
+    const a = joined[joined.length - 1];
+    const gap = a && parts.filter((c) => c.x0 > a.x1 && c.x1 < p.x0 && c.area >= 3);
+    const sep = gap && gap.length === 1 && gap[0].x0 - a.x1 <= a.seed.h && p.x0 - gap[0].x1 <= a.seed.h && separator(gap[0], a.seed);
+    if (!sep) { joined.push({ ...p, parts: [p] }); continue; }
+    a.parts.push(p);
+    a.text = sep === '/' ? `${a.text}/${p.text}` : `${p.text}${sep}${a.text}`;
+    a.x1 = p.x1;
+  }
+  // a year or a date: three digits or more, one of them at least plainly a digit other than ١
+  const out = joined.filter((n) => {
+    const run = n.parts.flatMap((p) => p.run);
+    const digits = run.filter((c) => best.has(c));
+    return run.length >= 3 && digits.some((c) => best.get(c).digit !== 1 && best.get(c).score >= 0.65);
+  }).map(({ x0, x1, text }) => ({ x0, x1, text }));
   return out.sort((a, b) => b.x1 - a.x1);
 }

@@ -556,3 +556,262 @@ export function headBlock({ number, title, numSide, fs = 12, atTop = true }) {
     type: 'p', runs, dir: 'rtl', align: !right ? 'end' : 'start', fs, lineCount: 1, lineGap: null, margin: true, runningHead: atTop ? 'top' : 'bottom',
   };
 }
+
+/**
+ * Book-level pass over the page numbers read under the text (`m.pageNo`, a book without drawn heads): every page gets the number the
+ * page sequence gives (`m.footer`), printed centred at its foot in the book's digits, so each page of the document has the number
+ * of the printed page: the pages before the first number read (the introduction) too, and the cover, numbered 0 or less by that
+ * sequence, none. The pages after the last number read (an uploader's stamp, the back cover) are printed without one. A digit
+ * misread on one page is outvoted by the pages around it; a page the book left blank (no text) gets none, as in print.
+ * @returns {{offset:number|null, numbered:number}}
+ */
+export function settlePageNumbers(models) {
+  const read = models.filter((m) => m?.pageNo);
+  const readings = read.map((m) => ({ index: m.n, n: m.pageNo.n }));
+  for (const m of models) if (m) delete m.footer;
+  if (!readings.length) return { offset: null, numbered: 0 };
+  const offsetAt = pageOffsets(readings);
+  const indic = read.filter((m) => m.pageNo.indic).length >= read.length / 2;
+  const last = Math.max(...readings.map((r) => r.index));
+  const hasText = (m) => m.blocks.some((b) => (b.type === 'p' && /\p{L}/u.test(textOf(b))) || b.type === 'table');
+  let numbered = 0;
+  for (const m of models) {
+    if (!m || m.n > last || !(m.pageNo || hasText(m))) continue;
+    const off = offsetAt(m.n);
+    if (off === null) continue;
+    const own = m.pageNo?.sure >= 0.1 ? m.pageNo.n : null;
+    const k = own && own !== m.n + off && Math.abs(own - (m.n + off)) <= 2 ? own : m.n + off;
+    if (k <= 0) continue;
+    m.footer = { text: indic ? toIndic(k) : String(k) };
+    numbered++;
+  }
+  for (const m of models) if (m) delete m.pageNo;
+  return { offset: pageNumberOffset(readings), numbered };
+}
+
+const DIGIT_VALUE = (s) => Number([...s].map((c) => (DIGIT[c] !== undefined ? DIGIT[c] : c)).join(''));
+
+/**
+ * The entries of the book's table of contents, in its order: a title starts at فصل / باب / كتاب or after a page number, and the
+ * numbers after it are hints of its page. The reader often joins the contents lines into one paragraph, splits a title from its
+ * number or misreads a digit ("ه" for ٥), so a contents page is one stream of words: five titles or more, four of them فصل / باب /
+ * كتاب, with numbers among them and few words to a title. The running head of the contents ("الموضوع الصحيفة") is left out.
+ * @returns {{title:string, pages:number[], at:number}[]} at: the index of the contents page
+ */
+export function contentsEntries(models) {
+  const out = [];
+  let last = -1; // the contents page before
+  for (const m of models) {
+    if (!m) continue;
+    const words = m.blocks.filter((b) => b.type === 'p' && !b.margin && !b.footnote)
+      .flatMap((b) => textOf(b).replace(/([0-9٠-٩۰-۹])(?=\p{L})|(\p{L})(?=[0-9٠-٩۰-۹])/gu, '$1$2 ').split(/\s+/)).filter(Boolean);
+    const entries = [];
+    let cur = null;
+    let numbers = 0;
+    let named = false;
+    const close = () => { if (cur?.words.length) entries.push(cur); cur = null; };
+    for (const w of words) {
+      const num = w.replace(/[^0-9٠-٩۰-۹]/g, '');
+      const letters = plainOf(w).replace(/[^\p{L}]/gu, '');
+      // the contents' own title ("مُحْتَوى ٱلكِتَابِ", "فهرس الموضوعات")
+      const title = named && /^[اٱ]?(لكتاب|لموضوعات)$/.test(letters);
+      named = /^(محتوى|فهرس)$/.test(letters);
+      if (named || title) continue;
+      if (num && !letters) {
+        if (cur) cur.pages.push(DIGIT_VALUE(num));
+        numbers++;
+        continue;
+      }
+      if (!letters) {
+        // dot leaders: what follows on the line is the page number, or a digit misread as a letter ("ه", "اغ")
+        if (cur && /[.·…_ـ．]/.test(w)) cur.leader = true;
+        continue;
+      }
+      if (/^(الموضوع|الصحيفة)$/.test(letters)) continue;
+      const start = CHAPTER.test(letters) || letters === 'فصل';
+      if (!start && cur?.leader && !cur.pages.length && letters.length <= 2) continue;
+      if (start || cur?.pages.length || cur?.leader) close();
+      if (!cur) cur = { words: [], pages: [], leader: false };
+      cur.words.push(w);
+    }
+    close();
+    const head = (e) => plainOf(e.words[0]).replace(/[^\p{L}]/gu, '');
+    const starts = entries.filter((e) => CHAPTER.test(head(e)) || head(e) === 'فصل').length;
+    const perEntry = entries.reduce((s, e) => s + e.words.length, 0) / Math.max(1, entries.length);
+    // the last page of the contents may hold an entry or two ("كتاب الفرائض ..... ٢٦٦"): the page after a contents page, each of its
+    // entries with its page number
+    const goesOn = m.n === last + 1 && entries.length >= 1 && entries.every((e) => e.pages.length) && perEntry <= 9;
+    if (!goesOn && (entries.length < 5 || starts < 4 || numbers < 3 || perEntry > 9)) continue;
+    last = m.n;
+    for (const e of entries) {
+      const title = e.words.join(' ').replace(/[«»"]/g, ' ').split(' ').filter(Boolean).join(' ');
+      const letters = plainOf(title).replace(/[^\p{L}]/gu, '');
+      if (letters.length >= 3 && !/^(محتوىالكتاب|فهرسالموضوعات|الفهرس)$/.test(letters)) out.push({ title, pages: e.pages, at: m.n });
+    }
+  }
+  return out;
+}
+
+const CHAPTER = /^(باب|كتاب|كتب)$/;
+const plainOf = (t) => stripMarks(String(t)).replace(/[[\]()«»]/g, ' ').split(' ').filter(Boolean).join(' ');
+const setText = (b, text) => {
+  const first = b.runs[0] || { fs: b.fs };
+  // a note's mark raised after the title stays ("كتاب الفرائض⁽¹⁾")
+  b.runs = [{ text, fs: first.fs ?? b.fs, bold: true, italic: false }, ...b.runs.filter((r) => r.sup)];
+  b.align = 'center';
+};
+
+/**
+ * Book-level pass: the chapter titles set in calligraphy, read from the book's table of contents, where they are printed in a plain
+ * font. The contents list them in the order of the book, so they are matched to the headings of the book in that order (the page
+ * number the contents print, after settlePageNumbers, only weighs in: the reader misreads many of its digits):
+ *  - "فصل في …": the bracketed heading "[في …]" has the فصلٌ ornament over it, which the reader cannot make out ("فَصَّنْكِ",
+ *    "فمشتك"): the line above the heading is written فَصْلٌ, or put there when the reader left it out;
+ *  - "باب …" / "كتاب …": the short line at the top of its page, unless it already reads as the contents print it, is written as they
+ *    print it (a calligraphic "كَاٱبْدُ لِأَعْشِكَافِكْ" becomes "كتاب الاعتكاف"); one the reader left out is put at the top of the
+ *    page the contents give it, when that page lies where the order of the book puts it;
+ *  - another title ("بين يدي الكتاب"): only a first line of as many words that reads much like it.
+ * @returns {{entries:number, fasl:number, titles:number}}
+ */
+export function fixHeadingsFromContents(models) {
+  const entries = contentsEntries(models);
+  const contentsPages = new Set(entries.map((e) => e.at));
+  const printed = (m) => (m.footer?.text ? DIGIT_VALUE(m.footer.text) : null);
+  const usable = (b) => b?.type === 'p' && !b.margin && !b.footnote;
+  const centred = (b) => usable(b) && b.align === 'center';
+  // where a title may stand, in the order of the book: the first line of a page, or a short centred line
+  const spots = [];
+  for (const m of models) {
+    if (!m || contentsPages.has(m.n)) continue;
+    const first = m.blocks.findIndex(usable);
+    m.blocks.forEach((b, i) => {
+      if (!usable(b)) return;
+      // without a note's mark after it ("بَابُ ٱلْهِبَةِ(١)")
+      const plain = plainOf(textOf(b).replace(/[([]\s*[0-9٠-٩۰-۹]{1,3}\s*[)\]]/g, ' '));
+      const n = plain.split(' ').length;
+      if (i === first || (centred(b) && n <= 12)) spots.push({ m, b, top: i === first, n, key: keyOf(plain) });
+    });
+  }
+  const want = entries.map((e) => {
+    const words = plainOf(e.title).split(' ');
+    const head = words[0].replace(/[^\p{L}]/gu, '');
+    const fasl = head === 'فصل' && words.length >= 2;
+    const chapter = CHAPTER.test(head);
+    // the contents misread a chapter's word too ("كتب الاعتكاف", "بَابِ التيمم")
+    const title = chapter ? [head === 'باب' ? 'باب' : 'كتاب', ...words.slice(1)].join(' ') : e.title;
+    return { e, words, fasl, chapter, title, key: keyOf(fasl ? words.slice(1).join(' ') : title) };
+  });
+  const score = (w, s) => {
+    const hint = w.e.pages.includes(printed(s.m)) ? 0.3 : 0;
+    if (w.fasl) {
+      if (!centred(s.b) || s.n > w.words.length + 2) return -1;
+      const sim = shapeSim(s.key, w.key);
+      return sim >= 0.6 ? sim + hint : -1;
+    }
+    // a calligraphic title is often not seen as centred (its strokes reach past the text): a short first line like it is the title;
+    // as many words as the title, one more or less: a body paragraph's first line is longer
+    // another title ("بين يدي الكتاب") as many words as the contents print: a heading of its own words that the contents name more
+    // shortly ("ترجمة الإمام العلامة", listed as "ترجمة المؤلف") is not theirs to rewrite
+    // a chapter can begin down a page, after the end of the one before ("* * *" and then "كتاب الفرائض"): a short centred line there,
+    // that reads more like it
+    const below = !s.top && w.chapter && centred(s.b);
+    if (!(s.top || below) || Math.abs(s.n - w.words.length) > (w.chapter ? 1 : 0)) return -1;
+    const sim = shapeSim(s.key, w.key);
+    // a calligraphic title misread keeps much of its shape ("هَا بِٱلبَسِيحِ" for كتاب البيع: 0.43); a body line rarely does (0.33)
+    return sim >= (below ? 0.5 : w.chapter ? 0.4 : 0.5) ? sim + hint : -1;
+  };
+  // the best matching that keeps both orders
+  const n = want.length;
+  const k = spots.length;
+  const dp = Array.from({ length: n + 1 }, () => new Float64Array(k + 1));
+  const took = Array.from({ length: n + 1 }, () => new Uint8Array(k + 1));
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= k; j++) {
+      let best = dp[i - 1][j];
+      let how = 1;
+      if (dp[i][j - 1] > best) { best = dp[i][j - 1]; how = 2; }
+      const s = score(want[i - 1], spots[j - 1]);
+      if (s > 0 && dp[i - 1][j - 1] + s > best) { best = dp[i - 1][j - 1] + s; how = 3; }
+      dp[i][j] = best;
+      took[i][j] = how;
+    }
+  }
+  const match = new Array(n).fill(null);
+  for (let i = n, j = k; i > 0 && j > 0;) {
+    if (took[i][j] === 3) { match[i - 1] = spots[j - 1]; i--; j--; } else if (took[i][j] === 1) i--; else j--;
+  }
+  const matched = new Set(match.filter(Boolean).map((s) => s.b));
+  // a picture kept before the first line of a page, not a فصلٌ ornament over its bracketed heading
+  const topPicture = (m) => {
+    const first = m.blocks.findIndex(usable);
+    const at = m.blocks.findIndex((b) => b.type === 'image' && b.margin);
+    return at >= 0 && (first < 0 || at < first) && !/^\s*\[/.test(textOf(m.blocks[first] || { runs: [] })) ? at : -1;
+  };
+  const taken = new Set();
+
+  let fasl = 0;
+  let titles = 0;
+  want.forEach((w, i) => {
+    const s = match[i];
+    if (w.fasl) {
+      if (!s) return;
+      const { m } = s;
+      const at = m.blocks.indexOf(s.b);
+      const above = m.blocks[at - 1];
+      const h = s.b;
+      const asText = { ...h, runs: [{ text: 'فَصْلٌ', fs: h.runs[0]?.fs ?? h.fs, bold: true, italic: false }], align: 'center' };
+      // the ornament as the reader wrote it: one short word, centred or starting as فصل does ("فَصَّنَّكِ", "فمشتك")
+      const read = usable(above) && !matched.has(above) ? plainOf(textOf(above)) : '';
+      const ornament = read && !/^\[/.test(textOf(above).trim())
+        && (centred(above) ? read.split(' ').length <= 3 : read.split(' ').length === 1 && /^ف\p{L}{1,5}$/u.test(read));
+      if (above?.type === 'image' && above.margin) {
+        // its long strokes made it look like a running head's rule: it was kept as a picture of the page's head
+        m.blocks.splice(at - 1, 1, asText);
+        fasl++;
+      } else if (ornament) {
+        if (read.replace(/[^\p{L}]/gu, '') !== 'فصل') { setText(above, 'فَصْلٌ'); fasl++; }
+      } else {
+        m.blocks.splice(at, 0, asText);
+        fasl++;
+      }
+      return;
+    }
+    if (s) {
+      // a heading already read as printed keeps its vowels
+      if (s.key === keyOf(w.title)) return;
+      setText(s.b, w.title);
+      titles++;
+      // the top of the calligraphy cut off as a picture over it ("بين يدي الكتاب")
+      const at = s.m.blocks.indexOf(s.b);
+      if (s.top && at > 0 && s.m.blocks[at - 1].type === 'image' && s.m.blocks[at - 1].margin) s.m.blocks.splice(at - 1, 1);
+      return;
+    }
+    if (!w.chapter) return;
+    // left out by the reader, or kept as a picture at the top of the page (its strokes look like a running head's rule): on the
+    // page the contents give, or the one page with such a picture, between the titles matched around it
+    const before = match.slice(0, i).reverse().find(Boolean)?.m.n ?? -Infinity;
+    const after = match.slice(i + 1).find(Boolean)?.m.n ?? Infinity;
+    const between = models.filter((x) => x && !contentsPages.has(x.n) && x.n >= before && x.n <= after);
+    const pictured = between.filter((x) => topPicture(x) >= 0 && !taken.has(x));
+    const m = between.find((x) => w.e.pages.includes(printed(x))) || (pictured.length === 1 ? pictured[0] : null);
+    if (!m) return;
+    const pic = topPicture(m);
+    if (pic >= 0) {
+      const like = m.blocks.find(usable) || { fs: 14 };
+      m.blocks.splice(pic, 1, { type: 'p', dir: 'rtl', fs: like.fs, runs: [{ text: w.title, fs: (like.fs || 14) + 4, bold: true, italic: false }], align: 'center', footnote: false, lineCount: 1 });
+      taken.add(m);
+      titles++;
+      return;
+    }
+    const first = m.blocks.findIndex(usable);
+    const top = m.blocks[first];
+    if (top && !matched.has(top) && centred(top) && Math.abs(plainOf(textOf(top)).split(' ').length - w.words.length) <= 1) {
+      setText(top, w.title);
+    } else {
+      const like = top || { type: 'p', dir: 'rtl', fs: 18, lineCount: 1, runs: [] };
+      m.blocks.splice(Math.max(0, first), 0, { ...like, type: 'p', dir: 'rtl', runs: [{ text: w.title, fs: (like.fs || 14) + 4, bold: true, italic: false }], align: 'center', footnote: false, lineCount: 1 });
+    }
+    titles++;
+  });
+  return { entries: entries.length, fasl, titles };
+}

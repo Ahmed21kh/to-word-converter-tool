@@ -5,10 +5,13 @@ import path from 'node:path';
 
 const round = (n) => Math.round(n * 10) / 10;
 
-const simplifyRuns = (runs, hl) => runs.map((r) => {
-  const o = { x: r.tab ? `   ${r.text}` : r.text }; // a running head's far end: set apart by wide spaces
+// a verse's half starts a column of its own (`h`)
+const simplifyRuns = (runs, hl, poem = false) => runs.map((r) => {
+  const o = { x: r.tab && !poem ?`   ${r.text}` : r.text }; // a running head's far end: set apart by wide spaces
+  if (r.tab && poem) o.h = 1;
   if (r.bold || r.verse) o.b = 1; // verses are set heavier, as in the Word file
   if (r.italic) o.i = 1;
+  if (r.sup) o.u = 1; // a note's mark, raised
   if (r.lowConf && hl) o.l = 1; // doubtful words are marked only when the option is on
   if (r.fs) o.s = round(r.fs);
   return o;
@@ -22,7 +25,9 @@ function simplifyPara(p, before = 0, hl = false) {
     fs: round(p.fs || 12),
     sb: round(before),
     lh: p.lineGap ? round(p.lineGap) : undefined,
-    runs: simplifyRuns(p.runs, hl),
+    pm: p.poem ? 1 : undefined,
+    ra: p.ruleAbove ? 1 : undefined, // the rule above the notes
+    runs: simplifyRuns(p.runs, hl, !!p.poem),
   };
 }
 
@@ -65,6 +70,8 @@ async function simplifyPage(page, previewDir, hl = false) {
     m: [margins.top, margins.right, margins.bottom, margins.left].map(round),
     method: page.method,
     flow: page.flow ? 1 : undefined,
+    // the page number, in the page footer of the Word file (settlePageNumbers)
+    foot: page.footer?.text || undefined,
     blocks: out,
   };
 }

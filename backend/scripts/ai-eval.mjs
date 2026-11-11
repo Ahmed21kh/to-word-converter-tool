@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { openPdf, renderPage } from '../src/pipeline/page-extract.js';
 import { readPageWithAi, visionStatus } from '../src/pipeline/vision-ocr.js';
-import { rgbaToGray, frameBands, crop, enhanceForAi } from '../src/pipeline/scan-clean.js';
+import { rgbaToGray, frameBands, crop, enhanceForAi, eraseStamp } from '../src/pipeline/scan-clean.js';
 import { stripMarks } from '../src/pipeline/arabic.js';
 import { letterAccuracy, fullAccuracy } from './score-text.mjs';
 
@@ -28,6 +28,7 @@ const H = canvas.height;
 const gray = rgbaToGray(canvas.getContext('2d').getImageData(0, 0, W, H).data, W, H);
 const bands = frameBands(gray, W, H);
 const body = bands ? crop(gray, W, H, bands.body) : { gray, width: W, height: H };
+eraseStamp(body.gray, body.width, body.height);
 const t0 = performance.now();
 const r = await readPageWithAi(await enhanceForAi(body.gray, body.width, body.height));
 const seconds = (performance.now() - t0) / 1000;

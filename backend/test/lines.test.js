@@ -362,3 +362,93 @@ test('isolateLine keeps the line and its margin, without the pieces of the lines
   assert.equal(out[(18 - 8) * w + 52], 0);
   assert.equal(out[(30 - 8) * w + 50], 0);
 });
+
+test('a phrase said twice in place of skipped words is caught; a word said twice is not', async () => {
+  const { hasEcho } = await import('../src/pipeline/vision-ocr.js');
+  assert.equal(hasEcho('مع مقارنة شرحه على نظمه على نظمه رضي الله عنه'), true);
+  assert.equal(hasEcho('دكا دكا وصفا صفا'), false, 'one word repeated is real Arabic');
+  assert.equal(hasEcho('مع مقارنة شرحه على نظمه بما قاله الإمام'), false);
+});
+
+test('verses, rows of ornaments and footnotes are paragraphs of their own; a footnote is never a heading', async () => {
+  const { groupLines, fixNoteNumbers, paragraphsToBlocks } = await import('../src/pipeline/vision-ocr.js');
+  const word = (text, half) => ({ text, conf: 1, alts: [], ...(half ? { half: true } : {}) });
+  const line = (x0, x1, texts, more = {}) => ({ x0, x1, y0: 0, y1: 50, words: texts.map((t, i) => word(t, more.halfAt === i)), ...more });
+  const g = groupLines([
+    line(100, 900, ['نص', 'المتن', 'الأول']),
+    line(100, 900, ['ثم', 'قال:']),
+    line(100, 900, ['فأبدله', 'مدا', 'كنؤمن', 'فادارأتم'], { halfAt: 2 }),
+    line(100, 900, ['وكالملك', 'أتوني', 'كذلك', 'ما'], { halfAt: 2 }),
+    { x0: 450, x1: 550, y0: 0, y1: 10, separator: true, footnote: false, words: [word('****')] },
+    line(500, 900, ['(١)', 'الروم:', 'قال'], { footnote: true }),
+    line(100, 900, ['ورومك', 'إسماع', 'بصوت', 'خفي'], { footnote: true, halfAt: 2 }),
+    line(100, 900, ['وقد', 'اختلفت', 'عبارات'], { footnote: true }),
+  ]);
+  assert.deepEqual(g.map((p) => [p.poem ? 'poem' : p.center ? 'center' : p.heading ? 'heading' : 'p', !!p.footnote]), [
+    ['p', false], ['poem', false], ['poem', false], ['center', false], ['p', true], ['poem', true], ['p', true],
+  ]);
+  assert.deepEqual(g[1].runs.map((r) => [r.text, !!r.tab]), [['فأبدله مدا ', true], ['كنؤمن فادارأتم', true]]);
+  assert.equal(g[3].text, '****');
+  fixNoteNumbers(g);
+  assert.equal(g[4].text, '(١) الروم: قال');
+  assert.equal(g[6].text, 'وقد اختلفت عبارات', 'the note goes on after the verse it quotes: no new number');
+  const blocks = paragraphsToBlocks(g, { bodyPt: 15 });
+  assert.equal(blocks[1].poem, true);
+  assert.deepEqual(blocks[1].runs.map((r) => !!r.tab), [true, true]);
+  // a note number the reader made scraps of
+  const [scraps] = fixNoteNumbers([{ text: '; ) الروم: قال', footnote: true, indent: 0, runs: [{ text: '; ) الروم: قال' }] }]);
+  assert.equal(scraps.text, '(١) الروم: قال');
+});
+
+test('a row of stars between two paragraphs is found, its broken stars counted once; a rule is no row of stars', async () => {
+  const { findSeparators } = await import('../src/pipeline/text-lines.js');
+  const w = 1000;
+  const h = 400;
+  const gray = new Uint8Array(w * h).fill(255);
+  const ink = (x0, x1, y0, y1) => { for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) gray[y * w + x] = 0; };
+  const lines = [{ x0: 100, x1: 900, y0: 20, y1: 100 }, { x0: 100, x1: 900, y0: 280, y1: 360 }];
+  // four stars, two of them broken in two pieces 2 px apart
+  for (const [k, x] of [440, 470, 500, 530].entries()) {
+    if (k % 2) { ink(x, x + 10, 170, 195); ink(x + 12, x + 22, 170, 195); } else ink(x, x + 22, 170, 195);
+  }
+  ink(150, 450, 230, 233); // a rule below them
+  const found = findSeparators(gray, w, h, lines);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].count, 4);
+});
+
+test('a row of stars the line finder took for a line of its own is a separator, that line not to be read', async () => {
+  const { findSeparators } = await import('../src/pipeline/text-lines.js');
+  const w = 1000;
+  const h = 600;
+  const gray = new Uint8Array(w * h).fill(255);
+  const ink = (x0, x1, y0, y1) => { for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) gray[y * w + x] = 0; };
+  // the last page of a chapter: two lines of text, then three stars
+  ink(100, 900, 40, 110);
+  ink(500, 900, 130, 200);
+  for (const x of [440, 490, 540]) ink(x, x + 22, 260, 285);
+  const lines = [{ x0: 100, x1: 900, y0: 30, y1: 115 }, { x0: 500, x1: 900, y0: 125, y1: 205 }, { x0: 440, x1: 562, y0: 258, y1: 287 }];
+  const found = findSeparators(gray, w, h, lines);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].count, 3);
+  assert.equal(found[0].line, lines[2]);
+});
+
+test('the dot leader of a contents line is found; a line of words with a few dots in it has none', async () => {
+  const { findLeader } = await import('../src/pipeline/text-lines.js');
+  const w = 1000;
+  const h = 60;
+  const gray = new Uint8Array(w * h).fill(255);
+  const ink = (x0, x1, y0, y1) => { for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) gray[y * w + x] = 0; };
+  // the title at the right, twelve dots on the baseline, the page number at the left
+  ink(700, 950, 15, 45);
+  for (let k = 0; k < 12; k++) ink(400 + k * 20, 406 + k * 20, 38, 44);
+  ink(100, 140, 15, 45);
+  const box = { x0: 100, x1: 950, y0: 10, y1: 50 };
+  assert.deepEqual(findLeader(gray, w, box), { x0: 400, x1: 625, count: 12 });
+  // words with ". ." between them
+  const prose = new Uint8Array(w * h).fill(255);
+  for (const [x0, x1] of [[100, 300], [340, 600], [640, 950]]) for (let y = 15; y < 45; y++) prose.fill(0, y * w + x0, y * w + x1);
+  for (const x of [610, 625]) for (let y = 38; y < 44; y++) prose.fill(0, y * w + x, y * w + x + 6);
+  assert.equal(findLeader(prose, w, box), null);
+});

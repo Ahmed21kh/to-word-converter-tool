@@ -2,6 +2,8 @@ import { createApp } from './app.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { ensureLlamaServer, stopLlamaServer } from './services/llama-server.js';
+import { visionStatus, geminiFallbacks } from './pipeline/vision-ocr.js';
+import { geminiConcurrency } from './services/gemini-throttle.js';
 
 const { app, jobs } = await createApp();
 
@@ -10,7 +12,30 @@ const { app, jobs } = await createApp();
 const server = app.listen(config.port, process.env.HOST || undefined); // HOST=127.0.0.1: this machine only (desktop app)
 server.once('listening', () => {
   logger.info({ port: config.port, workers: config.workers, maxConcurrentJobs: config.maxConcurrentJobs }, 'PDF to Word API listening');
+  logger.info(aiSetup(), 'AI reader');
 });
+
+/** Which AI reader the "ai" engine uses, and its limits: for the startup log. */
+function aiSetup() {
+  const st = visionStatus();
+  if (!st.available) return { available: false, hint: 'set VISION_PROVIDER to enable the AI engines' };
+  const list = (v) => (v || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return {
+    provider: st.provider,
+    model: st.model,
+    where: st.external ? 'cloud' : 'local',
+    ...(st.provider === 'gemini' ? {
+      fallbackModels: geminiFallbacks(),
+      timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS) || 60_000,
+      concurrency: geminiConcurrency(),
+      rpm: Number(process.env.GEMINI_RPM) || 'unlimited',
+      retries: Number(process.env.GEMINI_RETRIES) >= 0 && process.env.GEMINI_RETRIES !== '' ? Number(process.env.GEMINI_RETRIES) : 2,
+      mediaResolution: process.env.GEMINI_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_HIGH',
+      exemplar: process.env.GEMINI_EXEMPLAR || undefined,
+    } : {}),
+    ...(list(process.env.VISION_FALLBACK).length ? { fallbackReaders: list(process.env.VISION_FALLBACK), fallbackReaderModel: process.env.VISION_FALLBACK_MODEL || 'claude-haiku-5-5' } : {}),
+  };
+}
 server.once('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     logger.error(`Port ${config.port} is already in use (another copy of the API is probably running). Stop it, or start this one on another port, e.g.  PORT=4001 npm run dev`);

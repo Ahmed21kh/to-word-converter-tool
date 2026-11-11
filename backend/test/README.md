@@ -9,6 +9,8 @@ Run: `npm test` (from `backend/`). Fixtures are created with `npm run fixtures` 
 | `pipeline.test.js` | Converts the sample PDF end-to-end and checks the docx text: exact verses, un-reversed prose, no unmapped glyphs, pages in order. |
 | `vision.test.js` | AI reading against a local mock of the Messages API: request format, parsing, refusal, full page → Quran guard restores a verse, API error falls back to standard OCR. |
 | `lines.test.js` | Line reading helpers: confidence counts letters not diacritics and offers ف↔ق style alternatives, Arabic-only cleaning, lines → paragraphs/headings, line segmentation, alternative readings become Word comments. |
+| `throttle-scan.test.js` | The server-wide Gemini limit (also across worker threads, and a dead worker's turns given back) and the local reader's, deskew and paper evening of photographed pages, an uploader's stamp painted out, verses as a two-column table in Word. |
+| `wasla.test.js` | Hamzat al-wasl: a book that prints ٱ gets it back where the reader wrote a plain alif or a hamza (a word's own hamza kept); a book that does not is left as it is. |
 | `ocr.test.js` | ﷺ repair: junk after "رسول الله" / النبي becomes ﷺ (trailing punctuation kept); real words are never replaced. |
 | `api-run.mjs` | Manual: `node test/api-run.mjs <file> <out.docx> [options-json]` uploads to a running server, prints progress, downloads the result. |
 | `verify_docx.py` | Manual: reads a docx with python-docx (sections, RTL flags, tables, images, verse accuracy). `pip install python-docx` |

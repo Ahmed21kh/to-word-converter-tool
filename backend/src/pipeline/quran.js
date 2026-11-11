@@ -891,7 +891,9 @@ function markAiVerses(par, context) {
       const before = pieces.filter((pc) => pc.y <= k0).at(-1);
       const after = pieces.filter((pc) => pc.x >= k1).sort((u, v) => u.x - v.x)[0];
       const near = after && (!before || after.x - k1 < k0 - before.y) ? after.hit.start - (k1 - k0) : before ? before.hit.end : opts(windows).near;
-      for (const [p, q] of k1 - k0 === 2 ? [[k0, k1], [k0, k0 + 1]] : [[k0, k1]]) {
+      // the first word alone only when the second is a scrap the reader made, not a word: "( كتاب الفرائض )" is no ﴿كتاب﴾
+      const scrap = k1 - k0 === 2 && (isStrayLetter(toks[k0 + 1].w) || isJunkWord(toks[k0 + 1].w));
+      for (const [p, q] of scrap ? [[k0, k1], [k0, k0 + 1]] : [[k0, k1]]) {
         const hit = findNearby(join(p, q), windows, near);
         const letters = matchKey(join(p, q)).length;
         const inCited = !cite?.surah || load().words[hit?.start]?.s === cite.surah; // a citation names the surah it comes from

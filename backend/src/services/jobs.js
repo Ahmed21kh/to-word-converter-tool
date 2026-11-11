@@ -14,7 +14,24 @@ import { convertText } from '../pipeline/convert-text.js';
 import { visionStatus } from '../pipeline/vision-ocr.js';
 import { ensureLlamaServer } from './llama-server.js';
 
-const PHASE_WEIGHT = { queued: 0, analyzing: 2, batchPreparing: 2, batchWaiting: 2, converting: 90, retrying: 90, verifying: 94, building: 97, finalizing: 99, done: 100 };
+/**
+ * One line of the job log per page: how it was read (text layer, standard OCR, AI, picture), by which AI model and reader,
+ * and what went wrong on the way.
+ */
+function pageLog(jobId, meta) {
+  const problems = (meta.warnings || []).filter((w) => /fail|declin|error|truncated|fallback/.test(w)).map((w) => w.slice(0, 120));
+  return {
+    jobId,
+    page: meta.n,
+    method: meta.method,
+    ...(meta.aiModel ? { aiModel: meta.aiModel, aiVia: meta.aiVia, tokens: meta.aiTokens ? `${meta.aiTokens.input}/${meta.aiTokens.output}` : undefined } : {}),
+    ...(meta.method === 'ocr' && meta.confidence !== undefined ? { ocrConfidence: meta.confidence } : {}),
+    chars: meta.chars || undefined,
+    ...(problems.length ? { warnings: problems } : {}),
+  };
+}
+
+const PHASE_WEIGHT = { queued: 0, analyzing: 2, batchPreparing: 2, batchWaiting: 2, converting: 90, verifying: 94, building: 97, finalizing: 99, done: 100 };
 const PAUSE_TTL = 24 * 60 * 60_000;
 
 export class JobManager extends EventEmitter {
@@ -177,11 +194,25 @@ export class JobManager extends EventEmitter {
       isCancelled: () => job._cancel,
       // resolves when the job may go on (at once unless it is paused); rejects when it is cancelled meanwhile
       waitIfPaused: () => (job._paused ? new Promise((resolve, reject) => job._waiters.push({ resolve, reject })) : null),
+      onPage: (meta) => logger.info(pageLog(job.id, meta), 'page done'),
     };
+    const aiJob = job.options.engine === 'ai';
+    const st = aiJob ? visionStatus() : null;
+    logger.info({
+      jobId: job.id,
+      file: job.name,
+      kind: job.kind,
+      engine: job.options.engine,
+      ...(st?.available ? { aiProvider: st.provider, aiModel: st.model } : {}),
+      mode: job.options.mode,
+      quran: job.options.quran,
+      ...(job.options.printMatch ? { printMatch: true } : {}),
+      ...(job.options.aiBatch ? { aiBatch: true } : {}),
+    }, 'conversion started');
     let watch = null;
     try {
       let report;
-      if (job.options.engine === 'ai') {
+      if (aiJob) {
         await ensureLlamaServer().catch((err) => logger.warn({ err: err.message }, 'AI reader not available, using the standard OCR'));
         // a server that stops in the middle of a book is started again; the pages waiting for it go on with the AI
         watch = setInterval(() => ensureLlamaServer().catch(() => {}), 10_000);
@@ -210,6 +241,20 @@ export class JobManager extends EventEmitter {
       job.status = 'done';
       job.percent = 100;
       job.phase = 'done';
+      const scan = report.scan || {};
+      logger.info({
+        jobId: job.id,
+        pages: report.pages,
+        seconds: Math.round((report.durationMs || 0) / 1000),
+        methods: report.methods,
+        ...(scan.aiPages ? {
+          aiModels: scan.aiModels,
+          aiTokens: { input: scan.aiInputTokens, output: scan.aiOutputTokens, cached: scan.aiCachedTokens || undefined },
+          aiFallbackPages: scan.aiFallbackPages || undefined,
+        } : {}),
+        quran: report.quran ? { found: report.quran.found, corrected: report.quran.corrected, needsReview: report.quran.needsReview } : undefined,
+        reviewPages: report.reviewPages?.length || undefined,
+      }, 'conversion done');
     } catch (err) {
       if (err.message === 'cancelled' || job._cancel) {
         job.status = 'cancelled';

@@ -12,7 +12,7 @@ const PreviewDrawer = lazy(() => import('./PreviewDrawer.jsx'));
 
 const DEFAULT_OPTIONS = {
   format: 'docx', mode: 'smart', language: 'ar', engine: 'standard', quran: 'correct',
-  highlightUncertain: false, detectHeadings: true, frontAsPictures: true, printMatch: false, aiBatch: false, arabicFont: 'Traditional Arabic',
+  highlightUncertain: false, detectHeadings: true, frontAsPictures: true, printMatch: false, arabicFont: 'Traditional Arabic',
 };
 const FALLBACK_CAPS = {
   accept: ['.pdf', '.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.bmp', '.gif', '.txt', '.md', '.csv'],
@@ -37,7 +37,8 @@ export default function ConverterCard({ onCapabilities }) {
   useEffect(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
-      if (saved && typeof saved === 'object') setOptions((o) => ({ ...o, ...saved }));
+      // 'hybrid' (removed) saved by an older version is read as 'ai'; the economy (batch) reading is no longer offered
+      if (saved && typeof saved === 'object') setOptions((o) => ({ ...o, ...saved, ...(saved.engine === 'hybrid' ? { engine: 'ai' } : {}), aiBatch: false }));
     } catch { /* ignore broken storage */ }
     getCapabilities()
       .then((c) => {
@@ -76,6 +77,7 @@ export default function ConverterCard({ onCapabilities }) {
   const hasFinished = items.some((i) => ['done', 'error', 'cancelled'].includes(i.status));
   const docAvailable = caps.outputs.includes('doc');
   const ai = caps.features?.ai;
+  const aiEngine = options.engine === 'ai';
 
   const optionPanel = (
     <div className="grid gap-5 pt-1 md:grid-cols-2">
@@ -119,20 +121,12 @@ export default function ConverterCard({ onCapabilities }) {
             <Radio.Button value="ai" disabled={!ai?.available}>{t('converter.options.engineAi')}</Radio.Button>
           </Tooltip>
         </Radio.Group>
-        {options.engine === 'ai' && ai?.available && (
+        {aiEngine && ai?.available && (
           <p className="mb-0 mt-2 text-xs leading-6 text-amber-700 dark:text-amber-400">
             {ai.external ? t('converter.options.engineAiHintExternal', { service: ai.provider === 'gemini' ? 'Google Gemini' : 'Anthropic' }) : t('converter.options.engineAiHintLocal')}
           </p>
         )}
         {!ai?.available && <p className="mb-0 mt-2 text-xs text-slate-500">{t('converter.options.engineAiUnavailable')}</p>}
-        {options.engine === 'ai' && ai?.provider === 'gemini' && (
-          <Tooltip title={t('converter.options.aiBatchHint')}>
-            <label className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
-              <span className="font-semibold">{t('converter.options.aiBatch')}</span>
-              <Switch checked={!!options.aiBatch} onChange={(v) => setOpt('aiBatch', v)} />
-            </label>
-          </Tooltip>
-        )}
       </div>
 
       <div>
@@ -162,7 +156,7 @@ export default function ConverterCard({ onCapabilities }) {
         <span className="font-semibold">{t('converter.options.headings')}</span>
         <Switch checked={options.detectHeadings} onChange={(v) => setOpt('detectHeadings', v)} />
       </label>
-      {options.engine === 'ai' && !options.printMatch && (
+      {aiEngine && !options.printMatch && (
         <label className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
           <span className="font-semibold">{t('converter.options.frontAsPictures')}</span>
           <Switch checked={options.frontAsPictures !== false} onChange={(v) => setOpt('frontAsPictures', v)} />

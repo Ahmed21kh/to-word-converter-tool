@@ -11,7 +11,7 @@ const VERSE = /([\uFD3F\uFD3E][^\uFD3E\uFD3F]*[\uFD3E\uFD3F])/;
 const UNMAPPED = '\uFFFD';
 
 function Run({ run }) {
-  const style = { fontWeight: run.b ? 700 : undefined, fontStyle: run.i ? 'italic' : undefined };
+  const style = { fontWeight: run.b ? 700 : undefined, fontStyle: run.i ? 'italic' : undefined, ...(run.u ? { verticalAlign: 'super', fontSize: '0.65em', lineHeight: 0 } : {}) };
   const base = run.l ? { ...style, background: '#fde68a', borderRadius: 2 } : style;
   return run.x.split(VERSE).map((part, i) => {
     if (!part) return null;
@@ -37,7 +37,19 @@ function Para({ p }) {
     textAlign: p.al === 'both' ? 'justify' : p.al === 'start' ? 'start' : p.al,
     fontFamily: p.dir === 'rtl' ? AR_FONT : LAT_FONT,
     overflowWrap: 'anywhere',
+    // the rule above the notes, as the Word file draws it (a border 8 pt above the first note)
+    ...(p.ra ? { borderTop: '1px solid #000', paddingTop: 8 } : {}),
   };
+  if (p.pm) {
+    // a verse: its two halves side by side, each centred in its half of the line, as in the Word file
+    const halves = [];
+    p.runs.forEach((r) => { if (r.h || !halves.length) halves.push([]); halves[halves.length - 1].push(r); });
+    return (
+      <p dir={p.dir} style={{ ...style, display: 'flex' }}>
+        {halves.map((h, k) => <span key={k} style={{ flex: 1, textAlign: 'center' }}>{h.map((r, i) => <Run key={i} run={r} />)}</span>)}
+      </p>
+    );
+  }
   return <p dir={p.dir} style={style}>{p.runs.map((r, i) => <Run key={i} run={r} />)}</p>;
 }
 
@@ -63,7 +75,10 @@ function Table({ b }) {
 }
 
 function Paper({ page, jobId, scale }) {
-  const [mt, mr, mb, ml] = page.m;
+  const [mt, mr, mb0, ml] = page.m;
+  // the page number in the Word page's footer (docx-builder pageFooter): the body ends above it
+  const footAt = Math.max(10, Math.min(28, mb0 * 0.4));
+  const mb = page.foot ? Math.max(mb0, footAt + 13 * 1.8) : mb0;
   return (
     <div style={{ width: page.w * scale, height: page.h * scale, margin: '0 auto', direction: 'ltr', position: 'relative' }}>
       <article
@@ -81,6 +96,11 @@ function Paper({ page, jobId, scale }) {
               style={{ display: 'block', margin: '4px auto', width: b.full ? '100%' : b.w, maxWidth: '100%', height: 'auto' }} />
           );
         })}
+        {page.foot && (
+          <div dir="rtl" style={{ position: 'absolute', left: 0, right: 0, bottom: footAt, textAlign: 'center', fontSize: 13, fontFamily: AR_FONT }}>
+            {page.foot}
+          </div>
+        )}
       </article>
     </div>
   );

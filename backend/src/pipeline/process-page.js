@@ -7,8 +7,8 @@ import {
 } from './page-extract.js';
 import { textQuality, UNMAPPED, dominantDirection } from './arabic.js';
 import { recognize } from './ocr.js';
-import { prepareForOcr, rgbaToGray, frameBands, crop, enhanceForAi, eraseRules, inkFromGround } from './scan-clean.js';
-import { visionStatus, readPageWithAi, paragraphsToBlocks, fixBasmala } from './vision-ocr.js';
+import { prepareForOcr, rgbaToGray, frameBands, crop, enhanceForAi, straighten, eraseRules, eraseThinRules, eraseStamp, inkFromGround } from './scan-clean.js';
+import { visionStatus, readPageWithAi, paragraphsToBlocks, fixBasmala, describePageWithAi, BASMALA, PICTURE_PAGE, pageLabel } from './vision-ocr.js';
 import { readHead } from './running-head.js';
 import { matchKey, rasmKey } from './quran.js';
 import { segmentLines } from './text-lines.js';
@@ -72,6 +72,7 @@ async function pagePicture(page, workDir, n, dpi, quality = 85) {
   return { file, imgType: 'jpg', wPt: vp.width, hPt: vp.height, scale };
 }
 
+/** Read the page with the standard OCR. */
 async function ocrModel(page, n, opts, raw, blank = () => {}) {
   const { canvas } = await renderPage(page, OCR_DPI, 4200);
   blank(canvas);
@@ -79,6 +80,8 @@ async function ocrModel(page, n, opts, raw, blank = () => {}) {
   const effDpi = (canvas.width / vp.width) * 72;
   const rgba = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
   const gray = rgbaToGray(rgba, canvas.width, canvas.height);
+  // an uploader's stamp in the corner of the page is not the book's
+  if (opts.language !== 'en') eraseStamp(gray, canvas.width, canvas.height);
   // crop the decorative frame, drop diacritics on vowelled pages, normalise the text size
   const prep = opts.language === 'en'
     ? { gray, width: canvas.width, height: canvas.height, geometry: {}, info: { cropped: false } }
@@ -100,19 +103,20 @@ async function ocrModel(page, n, opts, raw, blank = () => {}) {
 
 /**
  * Whether a paragraph read from a page picture is only the page's text overlay over again (`overlay`: the text layer's own text):
- * two words or more, seven in ten of them overlay words (compared by letter shapes, dots aside), or no letter at all.
+ * two words or more, seven in ten of them overlay words (compared by letter shapes, dots aside), or no letter at all (but for a
+ * row of ornaments).
  */
 export function overlayTest(overlay) {
   const keyOf = (w) => rasmKey(matchKey(w));
   const words = new Set(String(overlay).split(/\s+/).map(keyOf).filter((k) => k.length >= 2));
   return (text) => {
-    if (!/\p{L}/u.test(text)) return true;
+    if (!/\p{L}/u.test(text)) return !/^[*\s]+$/.test(text); // a row of ornaments ("****") is the book's
     const ws = String(text).split(/\s+/).map(keyOf).filter((k) => k.length >= 2);
     return ws.length >= 2 && ws.filter((k) => words.has(k)).length >= ws.length * 0.7;
   };
 }
 
-const FLOW_MARGINS = { top: 36, bottom: 30, left: 42, right: 42 };
+export const FLOW_MARGINS = { top: 36, bottom: 30, left: 42, right: 42 };
 
 /**
  * "Matches the printed edition" keeps no pictures (Shamela does not take them): a cover or title page is read as text and its
@@ -132,10 +136,11 @@ async function readCard(page, opts, width) {
     const gray = inkFromGround(rgbaToGray(canvas.getContext('2d').getImageData(0, 0, W, H).data, W, H), W, H);
     const bands = frameBands(gray, W, H);
     const body = bands ? crop(gray, W, H, bands.body) : { gray, width: W, height: H };
+    if (opts.language !== 'en') eraseStamp(body.gray, body.width, body.height);
     jpeg = await enhanceForAi(eraseRules(body.gray, body.width, body.height), body.width, body.height);
   }
   // how sure the reader is of each word tells a line it could read from calligraphy it guessed at (settleCards)
-  const ai = await readPageWithAi(jpeg, { arabicOnly: false, ptPerPx: width / W, font: opts.arabicFont, card: true, probs: true, batch: opts.batch, cache: opts.aiCache });
+  const ai = await readPageWithAi(jpeg, { arabicOnly: false, ptPerPx: width / W, font: opts.arabicFont, card: true, probs: !!opts.highlightUncertain, batch: opts.batch, cache: opts.aiCache });
   // a line with no Arabic letter, no digit and no address is the reader talking ("I've been"), not the page
   ai.paragraphs = ai.paragraphs.filter((p) => /[؀-ۿ0-9]|@|www\.|https?:/.test(p.text));
   if (ai.refused || ai.noText || !ai.paragraphs.length) return null;
@@ -149,6 +154,26 @@ async function readCard(page, opts, width) {
     bbox: { x0: 0, y0: 0, x1: boxW, y1: 0 },
   };
   return { blocks: [table], usage: ai.usage, model: ai.model };
+}
+
+/** What a page nothing could be read from is (describePageWithAi): its name, or null. The page in colour, as printed. */
+/**
+ * Is the page white paper (as scanned) with next to no ink once cleaned (`clean`: the rule down its edge and the uploader's stamp
+ * painted out)? A cover whose light letters the clean-up lost is no such page: its ground is dark.
+ */
+function blankPaper({ gray, width, height }, clean) {
+  let sum = 0;
+  let ink = 0;
+  for (let i = 0; i < width * height; i++) {
+    sum += gray[i];
+    if (clean[i] < 140) ink++;
+  }
+  return sum / (width * height) > 200 && ink < width * height * 0.0005;
+}
+
+async function describePage(page) {
+  const { canvas } = await renderPage(page, 110, 1400);
+  return describePageWithAi(canvas.toBuffer('image/jpeg', 85));
 }
 
 const pageSizeMeta = (page) => {
@@ -173,27 +198,44 @@ export async function processPage(doc, n, opts, workDir) {
     }
     return { model, meta };
   };
-  // printMatch: the cover / title page as text in a box; a page without any text stays an empty page (never a picture)
-  const card = async () => {
-    const c = await readCard(page, opts, width);
-    if (!c) {
-      meta.warnings.push('front-matter-no-text');
-      return finish([], 'blank');
+  // printMatch keeps no pictures and no empty pages: a page that would be a picture (a cover, a title page, a page nothing could be
+  // read from) is read as text in a box; when there is no text to copy (calligraphy, ornaments), the AI names the page and the name
+  // is written in its place ("[غلاف الكتاب]", "[مقدمة الكتاب]"); a page it cannot name is written "[صفحة مصورة]".
+  const passDeferred = (err) => { if (err?.deferred) throw err; return null; };
+  const named = (text) => {
+    const [p] = paragraphsToBlocks([{ text, heading: false, center: true }], { bodyPt: 16 });
+    return finish([pageLabel(p)], 'ai', { chars: text.length, pageDir: 'rtl', flow: true, unmapped: 0 });
+  };
+  const noPicture = async (why) => {
+    if (why) meta.warnings.push(why);
+    if (opts.engine === 'ai' && visionStatus().available) {
+      const c = await readCard(page, opts, width).catch(passDeferred);
+      if (c) {
+        meta.warnings.push('front-matter-card');
+        return finish(c.blocks, 'ai', {
+          chars: c.blocks[0].cells[0].paras.reduce((s, p) => s + p.runs.reduce((a, r) => a + r.text.length, 0), 0),
+          pageDir: 'rtl',
+          aiModel: c.model,
+          aiTokens: { input: c.usage?.input_tokens || 0, output: c.usage?.output_tokens || 0 },
+          flow: true,
+          unmapped: 0,
+        });
+      }
+      const label = await describePage(page).catch(passDeferred);
+      if (label) {
+        meta.warnings.push('picture-page-named');
+        // the basmala page: its words, not its name
+        return named(label === 'البسملة' ? BASMALA : `[${label}]`);
+      }
     }
-    meta.warnings.push('front-matter-card');
-    return finish(c.blocks, 'ai', {
-      chars: c.blocks[0].cells[0].paras.reduce((s, p) => s + p.runs.reduce((a, r) => a + r.text.length, 0), 0),
-      pageDir: 'rtl',
-      aiModel: c.model,
-      aiTokens: { input: c.usage?.input_tokens || 0, output: c.usage?.output_tokens || 0 },
-      flow: true,
-      unmapped: 0,
-    });
+    meta.warnings.push('picture-page-unnamed');
+    return named(PICTURE_PAGE);
   };
 
   try {
-    if (opts.asCard && visionStatus().available) return await card();
+    if (opts.asCard && visionStatus().available) return await noPicture();
     // ---- exact mode, or a book's cover / title page: the page as a picture ------------------
+    if (opts.printMatch && (opts.mode === 'exact' || opts.asPicture)) return await noPicture();
     if (opts.mode === 'exact' || opts.asPicture) {
       if (opts.asPicture) meta.warnings.push('front-matter-picture');
       const pic = await pagePicture(page, workDir, n, 170, 88);
@@ -259,33 +301,45 @@ export async function processPage(doc, n, opts, workDir) {
     // ---- OCR path ---------------------------------------------------------------------
     const wantOcr = opts.ocr !== 'never' && (opts.mode === 'ocr' || !hasText || textResult || overlaid);
     if (wantOcr && (opts.mode === 'ocr' || textResult || textChars < 8 ? true : coverage > 0.3)) {
-      if (opts.engine === 'ai' && visionStatus().available) {
+      // The page as the AI reads it. A framed book page: the model reads only
+      // what is inside the frame (even paper tone, strong contrast, lines straight, slightly sharpened). The header / footer
+      // strips outside the frame (running title, page number, the drawn line) are not read at all: they are cut out of the page
+      // and placed back as pictures, exactly as printed.
+      let view = null;
+      const aiView = () => (view ||= (async () => {
+        const { canvas } = await renderPage(page, Number(process.env.VISION_IMAGE_DPI) || 200, 2600);
+        blank(canvas);
+        const W = canvas.width;
+        const H = canvas.height;
+        const gray = rgbaToGray(canvas.getContext('2d').getImageData(0, 0, W, H).data, W, H);
+        const bands = frameBands(gray, W, H);
+        const body = bands ? crop(gray, W, H, bands.body) : { gray, width: W, height: H };
+        const straight = (await straighten(body.gray, body.width, body.height)).gray;
+        // a rule down the side of the scan (the edge of the page): the line finder saw the page as one block
+        eraseThinRules(straight, body.width, body.height);
+        // an uploader's stamp in the corner of the page is not the book's
+        if (opts.language !== 'en') eraseStamp(straight, body.width, body.height);
+        return { W, H, gray, bands, body, straight };
+      })());
+      /** The page read by the AI: the finished page, or null when it declined or failed (the standard OCR reads it then). */
+      const readWithAi = async () => {
         try {
-          const { canvas } = await renderPage(page, Number(process.env.VISION_IMAGE_DPI) || 200, 2600);
-          blank(canvas);
-          // A framed book page: the model reads only what is inside the frame (enhanced: even paper tone, strong contrast,
-          // slightly sharpened). The header / footer strips outside the frame (running title, page number, the drawn
-          // line) are not read at all: they are cut out of the page and placed back as pictures, exactly as printed.
-          const W = canvas.width;
-          const H = canvas.height;
-          const gray = rgbaToGray(canvas.getContext('2d').getImageData(0, 0, W, H).data, W, H);
-          const bands = frameBands(gray, W, H);
-          const body = bands ? crop(gray, W, H, bands.body) : { gray, width: W, height: H };
+          const { W, H, gray, bands, body, straight } = await aiView();
           // printMatch: the running heads (page number, running title) are read as text, at the same time as the page
           const headOf = (box, atTop) => {
             const c = crop(gray, W, H, box);
             return readHead(c.gray, c.width, c.height, { atTop, arabicOnly: opts.language === 'ar' }).catch(() => null);
           };
           const framed = opts.printMatch && bands ? Promise.all([[bands.top, true], [bands.bottom, false]].filter(([b]) => b).map(([b, atTop]) => headOf(b, atTop))) : null;
-          const ai = await readPageWithAi(await enhanceForAi(body.gray, body.width, body.height), { arabicOnly: opts.language === 'ar', ptPerPx: width / W, font: opts.arabicFont, probs: !!opts.highlightUncertain, batch: opts.batch, cache: opts.aiCache });
-          // a second reading (convert-pdf.js) after a failed one: no standard OCR, the first result stays
-          if (ai.refused && opts.aiRetry) throw Object.assign(new Error('AI declined the page again'), { aiRetryFailed: true });
+          const ai = await readPageWithAi(await enhanceForAi(straight, body.width, body.height, { straight: true }), { arabicOnly: opts.language === 'ar', ptPerPx: width / W, font: opts.arabicFont, probs: !!opts.highlightUncertain, batch: opts.batch, cache: opts.aiCache });
+          // read by a fallback reader, or in bands, after the first one declined or failed: its text is the page's
+          if (!ai.refused && ai.tried?.length) meta.warnings.push(`ai-fallback:${ai.via}`);
           if (ai.refused) meta.warnings.push('ai-declined-used-standard-ocr');
-          // read by a fallback reader, or in bands, after the first one declined or failed
-          else if (ai.tried?.length) meta.warnings.push(`ai-fallback:${ai.via}`);
           else if (ai.noText) {
+            // a page the book left blank but for an uploader's stamp: an empty page (fillEmptyPages names it)
+            if (opts.printMatch && blankPaper(body, straight)) return finish([], 'blank');
             // a cover the clean-up made unreadable (light letters on a dark ground) is read again in colour
-            if (opts.printMatch) return await card();
+            if (opts.printMatch) return await noPicture();
             // cover art / ornaments: keep the picture
             const pic = await pagePicture(page, workDir, n, 170, 88);
             const block = { type: 'image', ...pic, bbox: { x0: 10, y0: 10, x1: width - 10, y1: height - 10 }, fullPage: true };
@@ -350,14 +404,21 @@ export async function processPage(doc, n, opts, workDir) {
               .filter((h) => h.title || h.hasNumber || h.hasTitle)
               .map((h) => ({ ...h, fs }));
             if (found.length) aiPage.model.heads = found;
+            // the page number under the text, read apart: set centred at the foot of the page from the book's sequence
+            if (ai.footer && !bands) aiPage.model.pageNo = ai.footer;
             return aiPage;
           }
         } catch (err) {
           // pass 1 of a batch conversion: the page is read in pass 2, from the batch's answers
           if (err?.deferred) throw err;
-          if (opts.aiRetry) throw Object.assign(err, { aiRetryFailed: true });
           meta.warnings.push(`ai-failed-used-standard-ocr:${String(err.message).slice(0, 90)}`);
         }
+        return null;
+      };
+      const aiOn = opts.engine === 'ai' && visionStatus().available;
+      if (aiOn) {
+        const aiPage = await readWithAi();
+        if (aiPage) return aiPage;
       }
       const { paras: read, res, prep } = await ocrModel(page, n, opts, raw, blank);
       const paras = read.filter((p) => !isOverlay(p.runs.map((r) => r.text).join('')));
@@ -387,8 +448,9 @@ export async function processPage(doc, n, opts, workDir) {
           fsBody: textResult.m.fsBody,
         });
       }
-      // nothing readable: if the page carries pictures, keep it as a picture
+      // nothing readable: if the page carries pictures, keep it as a picture (printMatch: its text or its name instead)
       if (coverage > 0.05 || raw.images.length) {
+        if (opts.printMatch) return await noPicture('no-readable-text');
         const pic = await pagePicture(page, workDir, n, 170, 88);
         meta.warnings.push('no-readable-text-kept-as-image');
         const block = { type: 'image', ...pic, bbox: { x0: 10, y0: 10, x1: width - 10, y1: height - 10 }, fullPage: true };
@@ -398,6 +460,7 @@ export async function processPage(doc, n, opts, workDir) {
       }
     } else if (!hasText && raw.images.length) {
       // OCR disabled: keep pictures
+      if (opts.printMatch) return await noPicture('no-readable-text');
       const pic = await pagePicture(page, workDir, n, 170, 88);
       const block = { type: 'image', ...pic, bbox: { x0: 10, y0: 10, x1: width - 10, y1: height - 10 }, fullPage: true };
       const r = finish([block], 'image');
@@ -406,9 +469,14 @@ export async function processPage(doc, n, opts, workDir) {
     }
     return finish([], 'blank');
   } catch (err) {
-    if (err?.deferred || err?.aiRetryFailed) throw err; // not a page error: the batch reads it, or the first reading stays
+    if (err?.deferred) throw err; // not a page error: the batch reads it
     meta.warnings.push(`page-error:${err.message}`);
     meta.error = err.message;
+    if (opts.printMatch) {
+      try { return await noPicture(); } catch (e) { if (e?.deferred) throw e; }
+      const [p] = paragraphsToBlocks([{ text: PICTURE_PAGE, heading: false, center: true }], { bodyPt: 16 });
+      return { model: { n, width, height, blocks: [pageLabel(p)], margins: { ...FLOW_MARGINS }, method: 'ai', flow: true }, meta: { ...meta, method: 'ai' } };
+    }
     try { // never leave a blank page: keep the original look as a picture
       const pic = await pagePicture(page, workDir, n, 150, 85);
       const block = { type: 'image', ...pic, bbox: { x0: 10, y0: 10, x1: width - 10, y1: height - 10 }, fullPage: true };

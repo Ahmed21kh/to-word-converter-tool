@@ -28,6 +28,7 @@
     "express-rate-limit": "^8.7.1",
     "helmet": "^8.3.0",
     "multer": "^2.5.0",
+    "p-retry": "^8.0.1",
     "pdfjs-dist": "^6.4.299",
     "pino": "^10.4.0",
     "sharp": "^0.35.5",

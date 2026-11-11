@@ -1,6 +1,7 @@
 // printMatch: a page number read by the shapes of its digits.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { createCanvas, GlobalFonts } from '@napi-rs/canvas';
 import { readPageDigits } from '../src/pipeline/page-digits.js';
 
@@ -30,5 +31,17 @@ test('a page number is read by the shapes of its digits, Arabic-Indic or Western
     const r = await readPageDigits(...printed(text, font));
     assert.equal(r?.n, n, `${text} read as ${r?.text}`);
     assert.equal(r.indic, indic, text);
+  }
+});
+
+test('a reference of two numbers is read whole: a volume and its page across a slash, a range across a dash', async () => {
+  const sharp = (await import('sharp')).default;
+  const { lineNumbers } = await import('../src/pipeline/page-digits.js');
+  // cut from a scanned book's note: "( ١٢٥/١٠ )", "( ١٦٧ـ١٤٢ )" and "( ٦١/١ )" as the page shows them
+  for (const [name, want] of [['volume', '١٢٥/١٠'], ['range', '١٤٢ـ١٦٧'], ['volume-short', '٦١/١']]) {
+    const { data, info } = await sharp(fileURLToPath(new URL(`./fixtures/ref-number-${name}.png`, import.meta.url)))
+      .greyscale().raw().toBuffer({ resolveWithObject: true });
+    const found = await lineNumbers(data, info.width, info.height, { x0: 0, x1: info.width, y0: 0, y1: info.height });
+    assert.deepEqual(found.map((n) => n.text), [want], name);
   }
 });

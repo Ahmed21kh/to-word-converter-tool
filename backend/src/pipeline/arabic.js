@@ -74,6 +74,27 @@ export function stripMarks(s) {
   return s.replace(/[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06EDـ\u08D3-\u08FF]/g, '');
 }
 
+/** Fatha, damma, kasra and sukun taken away; shadda, tanwin, the dagger alef and hamza marks stay. */
+export function dropShortVowels(s) {
+  return s.replace(/[\u064E-\u0650\u0652]/g, '');
+}
+
+// The dagger alef of هٰذا / هٰؤلاء is printed on a tatweel ("هـٰذا"): the reader takes the raised stroke for a tooth or a letter and
+// writes "هنذا", "هلذا", "هـذا" or "هاذا", none of them a word.
+const VOWELS = '[\u064B-\u0652\u0670]*';
+const HADHA = new RegExp(`^((?:[وف]${VOWELS})?(?:[بكل]${VOWELS})?)(ه${VOWELS})(?:(?:ـ${VOWELS})?[نلتيبا]${VOWELS}ـ?|ـ${VOWELS})(?=ذ${VOWELS}(?:ا|ه|ين|ان|ي)${VOWELS}(?:[^\p{L}\p{M}]|$)|ؤ${VOWELS}ل${VOWELS}ا${VOWELS}ء)`, 'u');
+
+/** A word of the هٰذا family misread at its dagger alef, written with it ("هلذا" -> "هٰذا"); any other word as it is. */
+export function fixDaggerAlef(word) {
+  const s = String(word);
+  const lead = s.match(/^[^\p{L}]*/u)[0];
+  const body = s.slice(lead.length);
+  const m = body.match(HADHA);
+  if (!m) return s;
+  const h = m[2].includes('\u0670') ? m[2] : `${m[2]}\u0670`;
+  return lead + (m[1] || '') + h + body.slice(m[0].length);
+}
+
 // ---- reversed-text detection -------------------------------------------------
 const COMMON = [
   'في', 'من', 'على', 'إلى', 'الى', 'أن', 'ان', 'ما', 'هذا', 'هذه', 'التي', 'الذي', 'الله', 'عن', 'كان', 'لا',

@@ -11,6 +11,7 @@ const fixture = fileURLToPath(new URL('./fixtures/scan-sample.pdf', import.meta.
 
 let server;
 let mode = 'ok';
+let minuteHit = false;
 const seen = [];
 const lineAnswers = []; // answers for per-line requests (logprobs asked)
 const ANSWER = [
@@ -41,9 +42,15 @@ before(async () => {
       if (req.url.includes(':generateContent')) { // Gemini API
         const sent = JSON.parse(body);
         seen.push({ gemini: sent, url: req.url, key: req.headers['x-goog-api-key'] });
-        if (mode === 'quota' && req.url.includes('/gemini-flash-latest:')) { // the free tier's daily limit of the larger model
+        if (mode === 'quota' && req.url.includes('/gemini-3.8-flash:')) { // the free tier's daily limit of the larger model
           res.writeHead(429, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ error: { code: 429, message: 'You exceeded your current quota. Quota exceeded for metric: generate_content_free_tier_requests, limit: 20. Please retry in 12h31m27.9s.', status: 'RESOURCE_EXHAUSTED' } }));
+          return;
+        }
+        if (mode === 'minute' && !minuteHit) { // the per-minute limit, once: Google asks for a short wait
+          minuteHit = true;
+          res.writeHead(429, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { code: 429, message: 'Quota exceeded for metric: generate_content_free_tier_requests per minute. Please retry in 0.3s.', status: 'RESOURCE_EXHAUSTED' } }));
           return;
         }
         if (mode === 'busy' && req.url.includes('/gemini-busy-model:')) { // Google's load: the model is overloaded
@@ -286,12 +293,13 @@ test('a local model reads the page line by line and says which words it is unsur
 
 test('Gemini reads the whole page through the official SDK; a held-back answer is a refusal', async () => {
   const { readPageWithAi, visionStatus } = await import('../src/pipeline/vision-ocr.js');
-  const saved = { p: process.env.VISION_PROVIDER, k: process.env.GEMINI_API_KEY, u: process.env.GEMINI_BASE_URL };
+  const saved = { p: process.env.VISION_PROVIDER, k: process.env.GEMINI_API_KEY, u: process.env.GEMINI_BASE_URL, m: process.env.GEMINI_MODEL };
+  delete process.env.GEMINI_MODEL; // the default model (backend/.env may set another)
   process.env.VISION_PROVIDER = 'gemini';
   process.env.GEMINI_API_KEY = 'gemini-test-key';
   process.env.GEMINI_BASE_URL = process.env.ANTHROPIC_BASE_URL;
   try {
-    assert.deepEqual(visionStatus(), { available: true, provider: 'gemini', model: 'gemini-flash-latest', external: true });
+    assert.deepEqual(visionStatus(), { available: true, provider: 'gemini', model: 'gemini-3.8-flash', external: true });
     mode = 'ok';
     seen.length = 0;
     const r = await readPageWithAi(Buffer.from('/9j/4AAQSkZJRg==', 'base64'));
@@ -300,7 +308,7 @@ test('Gemini reads the whole page through the official SDK; a held-back answer i
     assert.equal(r.usage.input_tokens, 1500);
     assert.equal(seen.length, 1, 'one request for the whole page, not one per line');
     const { gemini: sent, url, key } = seen[0];
-    assert.match(url, /models\/gemini-flash-latest:generateContent/);
+    assert.match(url, /models\/gemini-3.8-flash:generateContent/);
     assert.equal(key, 'gemini-test-key');
     const img = sent.contents[0].parts.find((p) => p.inlineData);
     assert.equal(img.inlineData.mimeType, 'image/jpeg');
@@ -317,15 +325,15 @@ test('Gemini reads the whole page through the official SDK; a held-back answer i
     seen.length = 0;
     const q = await readPageWithAi(Buffer.from('/9j/4AAQSkZJRg==', 'base64'));
     assert.equal(q.paragraphs.length, 2);
-    assert.equal(q.model, 'gemini-flash-lite-latest');
-    assert.deepEqual(seen.map((s) => s.url.match(/models\/([^:]+):/)[1]), ['gemini-flash-latest', 'gemini-flash-lite-latest']);
+    assert.equal(q.model, 'gemini-3.5-flash-lite');
+    assert.deepEqual(seen.map((s) => s.url.match(/models\/([^:]+):/)[1]), ['gemini-3.8-flash', 'gemini-3.5-flash-lite']);
     assert.ok(!seen[1].gemini.generationConfig.thinkingConfig.thinkingBudget, 'Flash-Lite does not take thinkingBudget 0');
     seen.length = 0;
     await readPageWithAi(Buffer.from('/9j/4AAQSkZJRg==', 'base64'));
     assert.equal(seen.length, 1, 'the used-up model is skipped');
   } finally {
     mode = 'ok';
-    for (const [k, v] of [['VISION_PROVIDER', saved.p], ['GEMINI_API_KEY', saved.k], ['GEMINI_BASE_URL', saved.u]]) {
+    for (const [k, v] of [['VISION_PROVIDER', saved.p], ['GEMINI_API_KEY', saved.k], ['GEMINI_BASE_URL', saved.u], ['GEMINI_MODEL', saved.m]]) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
@@ -477,23 +485,40 @@ test('a page Gemini holds back as recitation is read again in bands', async () =
   });
 });
 
-test('an overloaded model (503) is asked again after a pause, then the next model reads the page', async () => {
+test('an overloaded model (503) hands the page to the next model at once', async () => {
+  const { readPageWithAi } = await import('../src/pipeline/vision-ocr.js');
+  await withGemini(async () => {
+    mode = 'busy';
+    seen.length = 0;
+    const t0 = Date.now();
+    const r = await readPageWithAi(Buffer.from('/9j/4AAQSkZJRg==', 'base64'));
+    assert.equal(r.paragraphs.length, 2);
+    assert.equal(r.model, 'gemini-3.5-flash-lite');
+    assert.deepEqual(seen.map((s) => s.url.match(/models\/([^:]+):/)[1]), ['gemini-busy-model', 'gemini-3.5-flash-lite']);
+    assert.ok(Date.now() - t0 < 1500, 'no pause before the other model');
+  }, { GEMINI_MODEL: 'gemini-busy-model', GEMINI_RETRY_PAUSE_MS: '400' });
+});
+
+test('with no other model, an overloaded one is asked again after growing pauses, GEMINI_RETRIES times', async () => {
   const { readPageWithAi, geminiTransient } = await import('../src/pipeline/vision-ocr.js');
   await withGemini(async () => {
     mode = 'busy';
     seen.length = 0;
-    const r = await readPageWithAi(Buffer.from('/9j/4AAQSkZJRg==', 'base64'));
-    assert.equal(r.paragraphs.length, 2);
-    assert.equal(r.model, 'gemini-flash-lite-latest');
-    const asked = seen.map((s) => s.url.match(/models\/([^:]+):/)[1]);
-    assert.ok(asked.filter((m) => m === 'gemini-busy-model').length >= 3, 'the busy model is tried more than once');
-    assert.equal(asked.at(-1), 'gemini-flash-lite-latest');
-  }, { GEMINI_MODEL: 'gemini-busy-model', GEMINI_RETRY_PAUSE_MS: '20' });
+    const t0 = Date.now();
+    await assert.rejects(readPageWithAi(Buffer.from('/9j/4AAQSkZJRg==', 'base64')), /AI reading failed/);
+    assert.equal(seen.length, 4, 'the first request and three retries');
+    assert.ok(Date.now() - t0 >= 20 + 40 + 80, 'exponential pauses between them');
+  }, { GEMINI_MODEL: 'gemini-busy-model', GEMINI_FALLBACK_MODEL: '', GEMINI_RETRIES: '3', GEMINI_RETRY_PAUSE_MS: '20' });
   assert.equal(geminiTransient({ status: 503 }), true);
   assert.equal(geminiTransient({ status: 504 }), true);
   assert.equal(geminiTransient({ status: 400 }), false);
+  assert.equal(geminiTransient({ status: 429 }), false, 'a quota answer is handled apart');
   assert.equal(geminiTransient(new Error('fetch failed')), true);
+  assert.equal(geminiTransient(Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_SOCKET', message: 'other side closed' } })), true);
+  assert.equal(geminiTransient(Object.assign(new Error('x'), { cause: { code: 'ECONNRESET' } })), true);
+  assert.equal(geminiTransient(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })), true);
   assert.equal(geminiTransient(new Error('bad request body')), false);
+  assert.equal(geminiTransient(Object.assign(new Error('Gemini is busy: no request slot came free in time'), { throttled: true })), false);
 });
 
 test('VISION_FALLBACK=claude reads a page Gemini declined', async () => {
@@ -507,6 +532,45 @@ test('VISION_FALLBACK=claude reads a page Gemini declined', async () => {
     assert.equal(seen.at(-1).model, 'claude-haiku-5-5');
     assert.ok(r.tried[0].startsWith('gemini:RECITATION'));
   }, { VISION_FALLBACK: 'claude' });
+});
+
+test('a per-minute 429 holds the requests as long as Google asks, then the same model reads the page', async () => {
+  const { readPageWithAi } = await import('../src/pipeline/vision-ocr.js');
+  await withGemini(async () => {
+    mode = 'minute';
+    minuteHit = false;
+    seen.length = 0;
+    const t0 = Date.now();
+    const r = await readPageWithAi(Buffer.from('/9j/4AAQSkZJRg==', 'base64'));
+    assert.equal(r.paragraphs.length, 2);
+    assert.equal(r.model, 'gemini-minute-model', 'not sent on to the fallback model');
+    assert.equal(seen.length, 2);
+    assert.ok(Date.now() - t0 >= 300, 'waited the 0.3 s Google asked for');
+  }, { GEMINI_MODEL: 'gemini-minute-model' }); // (the quota test above has blocked the default model for the day)
+});
+
+test('a page read by a fallback reader keeps that reading (it is not read again by the standard OCR)', { skip: !existsSync(fixture) }, async () => {
+  const { openPdf } = await import('../src/pipeline/page-extract.js');
+  const { processPage } = await import('../src/pipeline/process-page.js');
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'p2w-fb-'));
+  try {
+    await withGemini(async () => {
+      mode = 'recitation';
+      const doc = await openPdf(fixture);
+      const page = await processPage(doc, 1, { mode: 'smart', ocr: 'auto', language: 'ar', engine: 'ai', defaultDir: 'rtl' }, dir);
+      assert.equal(page.meta.method, 'ai');
+      assert.equal(page.meta.aiVia, 'claude');
+      assert.ok(page.meta.warnings.includes('ai-fallback:claude'));
+    }, { VISION_FALLBACK: 'claude' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the removed 'hybrid' engine is read as 'ai' (a setting saved by an older version)", async () => {
+  const { normalizeOptions } = await import('../src/pipeline/convert-pdf.js');
+  assert.equal(normalizeOptions({ engine: 'hybrid' }).engine, 'ai');
+  assert.equal(normalizeOptions({ engine: 'standard' }).engine, 'standard');
 });
 
 test('batch mode: pass 1 queues the read, pass 2 takes the answer without a request', async () => {
@@ -558,11 +622,11 @@ test('runBatch sends the queued requests as one job, stores the answers, and res
         cancel: async () => {},
       },
     };
-    assert.deepEqual(await runBatch(ai, dir, 'gemini-flash-latest', { pollMs: 1 }), { state: 'JOB_STATE_SUCCEEDED', sent: 2, answered: 1, failed: 1 });
+    assert.deepEqual(await runBatch(ai, dir, 'gemini-3.8-flash', { pollMs: 1 }), { state: 'JOB_STATE_SUCCEEDED', sent: 2, answered: 1, failed: 1 });
     assert.equal(lines, 2);
     assert.ok(await batchAnswer(dir, 'a'));
     assert.equal(await batchAnswer(dir, 'b'), null, 'a request the batch failed is read live');
-    await runBatch(ai, dir, 'gemini-flash-latest', { pollMs: 1 });
+    await runBatch(ai, dir, 'gemini-3.8-flash', { pollMs: 1 });
     assert.equal(created, 1, 'a restart does not send the batch again');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -594,4 +658,22 @@ test('a page read whole: the notes under the rule become footnotes, one per note
   assert.ok(markFootnotes([{ text: 'المتن' }, { text: '(١) أولاً.' }]).every((p) => !p.footnote));
   // a "---" with text after it but no rule and no note number is an ornament, dropped
   assert.deepEqual(markFootnotes([{ text: 'أ' }, { text: '-----' }, { text: 'ب' }]).map((p) => p.text), ['أ', 'ب']);
+});
+
+test('a verse a cloud reader wrote as "right half // left half" is a paragraph of its own, in two halves', async () => {
+  const { parseTranscription, markIllegible, ILLEGIBLE } = await import('../src/pipeline/vision-ocr.js');
+  const { paragraphs } = parseTranscription(`قال الشاطبي:\nفأبدله مدا إن يسكن أصالة // كنؤمن فادارأتم الذئب مثلا\nوكالملك ائتوني وفاتوا الذي ائتمن // كذلك ما في الوقف سكن كالملا\nهذا شروع في بيان`);
+  assert.deepEqual(paragraphs.map((p) => !!p.poem), [false, true, true, false]);
+  assert.deepEqual(paragraphs[1].runs.map((r) => [r.text, r.tab]), [['فأبدله مدا إن يسكن أصالة ', true], ['كنؤمن فادارأتم الذئب مثلا', true]]);
+  assert.equal(paragraphs[1].text, 'فأبدله مدا إن يسكن أصالة كنؤمن فادارأتم الذئب مثلا');
+  // an unreadable word in a half keeps the halves' tabs
+  const p = markIllegible({ text: `أ ${ILLEGIBLE} ب ج`, poem: true, runs: [{ text: `أ ${ILLEGIBLE} `, tab: true }, { text: 'ب ج', tab: true }] });
+  assert.deepEqual(p.runs.map((r) => [r.text, !!r.tab, !!r.lowConf]), [['أ ', true, false], [ILLEGIBLE, false, true], [' ', false, false], ['ب ج', true, false]]);
+});
+
+test('a row of ornaments is never taken for the overlay text of a page', async () => {
+  const { overlayTest } = await import('../src/pipeline/process-page.js');
+  const isOverlay = overlayTest('www.quranonlinelibrary.com المكتبة العالمية');
+  assert.equal(isOverlay('****'), false);
+  assert.equal(isOverlay('٣٤'), true, 'a lone number left of the overlay');
 });

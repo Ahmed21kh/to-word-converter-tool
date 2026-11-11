@@ -78,38 +78,32 @@ test('Arabic PDF with Quran verses converts to a faithful, ordered docx', { skip
   assert.ok(i1 >= 0 && i1 < i2 && i2 < i3, 'chapters must appear in page order');
 });
 
-test('pages Google could not read are read again with the AI; one that fails again keeps its first reading', async () => {
-  const { rereadMissed, dropPictures } = await import('../src/pipeline/convert-pdf.js');
-  const page = (n, method, warnings = []) => ({ model: { n, method, blocks: [] }, meta: { n, method, warnings } });
-  const results = [
-    page(1, 'ai'),
-    page(2, 'ocr', ['ai-failed-used-standard-ocr:AI reading failed (gemini:{"error":{"code":503']),
-    page(3, 'ocr', ['ai-failed-used-standard-ocr:AI reading failed (gemini:{"error":{"code":504']),
-  ];
-  const calls = [];
-  const phases = [];
-  await rereadMissed({
-    results,
-    pauses: [0, 0],
-    runOnce: async (n, extra) => {
-      calls.push([n, extra.aiRetry]);
-      if (n === 3) throw new Error('AI reading failed again');
-      return page(n, 'ai');
-    },
-    onProgress: (p) => phases.push(p.phase),
-    isCancelled: () => false,
-  });
-  assert.equal(results[1].meta.method, 'ai', 'page 2 is now the AI reading');
-  assert.equal(results[2].meta.method, 'ocr', 'page 3 keeps its OCR reading');
-  assert.deepEqual(calls, [[2, true], [3, true], [3, true]], 'two rounds; only the pages still missing');
-  assert.ok(phases.every((p) => p === 'retrying'));
-
-  // printMatch drops pictures, but not a page that is nothing but its picture (it would come out empty)
+test('printMatch drops every picture, and no page is left empty', async () => {
+  const { dropPictures, fillEmptyPages } = await import('../src/pipeline/convert-pdf.js');
   const pics = [
     { model: { blocks: [{ type: 'image', fullPage: true }] }, meta: { warnings: ['no-readable-text-kept-as-image'] } },
-    { model: { blocks: [{ type: 'p', runs: [] }, { type: 'image' }] }, meta: { warnings: [] } },
+    { model: { blocks: [{ type: 'p', runs: [{ text: 'نص' }] }, { type: 'image' }] }, meta: { warnings: [] } },
+    { model: { blocks: [] }, meta: { warnings: [] } },
   ];
   dropPictures(pics);
-  assert.equal(pics[0].model.blocks.length, 1);
+  assert.equal(pics[0].model.blocks.length, 0);
   assert.deepEqual(pics[1].model.blocks.map((b) => b.type), ['p']);
+  const models = pics.map((r) => r.model);
+  assert.equal(fillEmptyPages(models), 2);
+  const textOf = (m) => m.blocks.map((b) => b.runs.map((r) => r.text).join('')).join(' ');
+  assert.equal(textOf(models[0]), '[صفحة مصورة]');
+  assert.equal(textOf(models[1]), 'نص');
+  assert.equal(textOf(models[2]), '[صفحة فارغة]');
+  assert.ok(models[0].flow && models[0].blocks[0].noHeading && models[0].blocks[0].align === 'center');
+});
+
+test('a page name from the AI: one short Arabic line, listed names written as listed', async () => {
+  const { cleanPageLabel } = await import('../src/pipeline/vision-ocr.js');
+  assert.equal(cleanPageLabel('مُقَدِّمَةُ الكِتَابِ'), 'مقدمة الكتاب');
+  assert.equal(cleanPageLabel('« غلاف الكتاب »' + String.fromCharCode(10) + 'explanation'), 'غلاف الكتاب');
+  assert.equal(cleanPageLabel('# تعريف الكتاب.'), 'تعريف الكتاب');
+  assert.equal(cleanPageLabel('The cover of the book'), null);
+  assert.equal(cleanPageLabel('[[NO_TEXT]]'), null);
+  assert.equal(cleanPageLabel('هذه صفحة فيها كلام كثير لا يصلح أن يكون اسما لها أبدا'), null);
+  assert.equal(cleanPageLabel('ختم الناشر'), 'ختم الناشر');
 });

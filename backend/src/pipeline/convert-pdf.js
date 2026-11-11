@@ -6,16 +6,19 @@ import { fixHonorifics, fixHeadingBrackets, writesSalla, wordCounts } from './ho
 import { buildDocx } from './docx-builder.js';
 import { UNMAPPED } from './arabic.js';
 import { savePreview } from './preview.js';
-import { visionStatus, geminiClient, createPageCache, deletePageCache } from './vision-ocr.js';
+import { visionStatus, geminiClient, createPageCache, deletePageCache, paragraphsToBlocks, PICTURE_PAGE, BLANK_PAGE, pageLabel } from './vision-ocr.js';
 import { runBatch } from './gemini-batch.js';
-import { settleRunningHeads } from './running-head.js';
-import { fixDoubtfulWords, fixDotSlips } from './book-words.js';
+import { settleRunningHeads, settlePageNumbers, fixHeadingsFromContents } from './running-head.js';
+import { fixDoubtfulWords, fixDotSlips, fixMaqsuraHamza, fixItemNumbers, fixSplitWords } from './book-words.js';
+import { fixWasla } from './wasla.js';
+import { geminiConcurrency } from '../services/gemini-throttle.js';
 
 export const DEFAULT_OPTIONS = {
   format: 'docx', // docx | doc
   mode: 'smart', // smart | ocr | exact
   language: 'ar', // ar (Arabic OCR model) | mixed (Arabic + English) | en
-  engine: 'standard', // standard (free Tesseract) | ai (vision model, needs VISION_PROVIDER)
+  // standard (free Tesseract) | ai (vision model, needs VISION_PROVIDER)
+  engine: 'standard',
   quran: 'correct', // correct | verify | off
   ocr: 'auto', // auto | never
   arabicFont: 'Traditional Arabic',
@@ -35,7 +38,8 @@ export function normalizeOptions(input = {}) {
   o.language = pick(input.language, ['ar', 'en', 'mixed'], o.language);
   o.quran = pick(input.quran, ['correct', 'verify', 'off'], o.quran);
   o.ocr = pick(input.ocr, ['auto', 'never'], o.ocr);
-  o.engine = pick(input.engine, ['standard', 'ai'], o.engine);
+  // 'hybrid' (removed) is read as 'ai': a saved setting or an older page still sends it
+  o.engine = pick(input.engine === 'hybrid' ? 'ai' : input.engine, ['standard', 'ai'], o.engine);
   const font = (v, d) => (typeof v === 'string' && /^[\p{L}\p{N} \-]{2,40}$/u.test(v) ? v : d);
   o.arabicFont = font(input.arabicFont, o.arabicFont);
   o.latinFont = font(input.latinFont, o.latinFont);
@@ -114,7 +118,7 @@ export function runQuranGuard(pages, mode) {
  * builds the pages from the answers, and reads live whatever the batch did not answer, so a failed or expired batch loses no
  * page. A job already sent (a restart while it waited) is not prepared or sent again.
  */
-async function batchPass({ pool, file, total, jobId, workDir, taskOptions, front, frontAs, lanes, loadPage, saved, onProgress, isCancelled, waitIfPaused }) {
+async function batchPass({ pool, file, total, jobId, workDir, taskOptions, isCover, frontAs, lanes, loadPage, saved, onProgress, isCancelled, waitIfPaused }) {
   const dir = path.join(workDir, 'batch');
   const sent = await readFile(path.join(dir, 'job.json'), 'utf8').then(() => true).catch(() => false);
   if (!sent) {
@@ -128,7 +132,7 @@ async function batchPass({ pool, file, total, jobId, workDir, taskOptions, front
         if (next >= total) break;
         const n = ++next;
         if (!(await loadPage(n))) {
-          const options = { ...taskOptions, ...(n <= front ? frontAs : {}), batch: { dir, collect: true } };
+          const options = { ...taskOptions, ...(isCover(n) ? frontAs : {}), batch: { dir, collect: true } };
           const page = await pool.run({ type: 'page', file, n, options, workDir }, { jobId }).catch((err) => {
             if (err.message === 'cancelled') throw err;
             return null; // queued for the batch (DEFERRED), or failed: either way pass 2 reads it
@@ -169,6 +173,21 @@ async function frontMatter(pool, file, total, jobId) {
 }
 
 /**
+ * The back cover: the pages at the end of the book in colour (at most two, and none of the front matter's). Read as text, its
+ * blurb on a coloured ground gave scattered words; it is taken as the front cover is.
+ * @returns {Promise<number>} how many trailing pages are the back cover
+ */
+async function backMatter(pool, file, total, front, jobId) {
+  let back = 0;
+  for (let n = total; n > Math.max(front, total - 2); n--) {
+    const probe = await pool.run({ type: 'probe', file, n }, { jobId }).catch(() => null);
+    if (!probe || probe.color < 0.05) break;
+    back++;
+  }
+  return back;
+}
+
+/**
  * @param ctx {jobId,file,workDir,outPath,options,pool,onProgress,isCancelled,waitIfPaused}
  */
 export async function convertPdf(ctx) {
@@ -191,21 +210,27 @@ export async function convertPdf(ctx) {
     }
   };
   // A local AI model answers one page at a time, so do not queue every worker behind it (the queue wait would
-  // count against the request timeout); a cloud API takes a few pages at once.
+  // count against the request timeout); a cloud API takes a few pages at once. Gemini: as many pages as its server-wide limit
+  // has turns (GEMINI_CONCURRENCY), so a page never spends its time limit waiting for one (a fourth page on three turns, while
+  // an overloaded model takes a minute per answer, is what ran out of time).
   const vision = options.engine === 'ai' ? visionStatus() : null;
-  const lanes = Math.max(1, Math.min(total, vision?.available ? Number(process.env.AI_CONCURRENCY) || (vision.external ? 4 : 2) : total));
+  const aiLanes = () => (vision.provider === 'gemini' ? geminiConcurrency() : vision.external ? 4 : 2);
+  const lanes = Math.max(1, Math.min(total, vision?.available ? Number(process.env.AI_CONCURRENCY) || aiLanes() : total));
   // Every converted page is kept in the work folder: a paused conversion (or one cut by a server restart) goes on from the
   // pages it has, it does not read them again.
   const saved = path.join(workDir, 'pages');
   await mkdir(saved, { recursive: true });
   const loadPage = (n) => readFile(path.join(saved, `${n}.json`), 'utf8').then(JSON.parse).catch(() => null);
   // the cover and title pages: pictures, or (printMatch, which keeps no pictures) their text in a box
-  const front = vision?.available && (options.frontAsPictures || options.printMatch) ? await frontMatter(pool, file, total, jobId) : 0;
+  const covers = vision?.available && (options.frontAsPictures || options.printMatch);
+  const front = covers ? await frontMatter(pool, file, total, jobId) : 0;
+  const back = covers && total > 2 ? await backMatter(pool, file, total, front, jobId) : 0;
+  const isCover = (n) => n <= front || n > total - back;
   const frontAs = options.printMatch ? { asCard: true } : { asPicture: true };
   const gemini = vision?.available && vision.provider === 'gemini';
   // a worked example for the reader, cached once for the whole book (GEMINI_EXEMPLAR; nothing without it)
   if (gemini) taskOptions.aiCache = await createPageCache(vision.model);
-  const batch = gemini && options.aiBatch ? await batchPass({ pool, file, total, jobId, workDir, taskOptions, front, frontAs, lanes, loadPage, saved, onProgress, isCancelled, waitIfPaused }) : null;
+  const batch = gemini && options.aiBatch ? await batchPass({ pool, file, total, jobId, workDir, taskOptions, isCover, frontAs, lanes, loadPage, saved, onProgress, isCancelled, waitIfPaused }) : null;
   if (batch) taskOptions.batch = { dir: batch.dir };
   // the printed pages, small, for the preview beside the converted ones: drawn by the workers the reading leaves idle
   const sources = [];
@@ -221,16 +246,16 @@ export async function convertPdf(ctx) {
       if (ctx.previewDir) sources.push(pool.run({ type: 'source', file, n, out: path.join(ctx.previewDir, `src-${n}.jpg`) }, { jobId }).catch(() => {}));
       let page = await loadPage(n);
       if (!page) {
-        page = await runPage(n, n <= front ? frontAs : {});
+        page = await runPage(n, isCover(n) ? frontAs : {});
         if (page.model?.method !== 'error') await writeFile(path.join(saved, `${n}.json`), JSON.stringify(page)).catch(() => {});
       }
       results[n - 1] = page;
+      ctx.onPage?.(page.meta); // the job log: how the page was read
       done++;
       onProgress({ phase: 'converting', done, total });
     }
   }));
   if (isCancelled()) throw new Error('cancelled');
-  if (vision?.available) await rereadMissed({ results, runOnce: (n, extra) => pool.run({ type: 'page', file, n, options: { ...taskOptions, ...extra }, workDir }, { jobId }), front, frontAs, saved, onProgress, isCancelled, waitIfPaused });
   // (a cancelled job leaves its cache to expire by itself, in two hours at most)
   await deletePageCache(taskOptions.aiCache);
 
@@ -261,12 +286,25 @@ export async function convertPdf(ctx) {
   // a word the reader was unsure of, or got a dot wrong in, set by the words the book prints elsewhere
   fixDoubtfulWords(pageModels);
   fixDotSlips(pageModels);
+  // a word split in two at a letter that does not join the next ("شيو خه"), and "بز" for "بن" in a line of names
+  fixSplitWords(pageModels);
+  // an alef maqsura with a dagger alef over it (علىٰ) that the reader took for a ya with a hamza ("يتهادئ")
+  fixMaqsuraHamza(pageModels);
+  // a numbered item read with a digit too many ("٣ـ" as "٣٢–"), set by the items before and after it
+  fixItemNumbers(pageModels);
+  // a book that prints hamzat al-wasl (ٱ): its alifs written so, where the reader wrote a plain alif or took the mark for a hamza
+  fixWasla(pageModels);
   // printMatch: the page numbers from the page sequence, the running titles as the book prints them
   const heads = settleRunningHeads(pageModels, { bookTitle: ctx.title });
+  // the page number under the text: from the page sequence, centred at the foot of each page from where the book's numbering starts
+  const pageNumbers = settlePageNumbers(pageModels);
+  // the calligraphic chapter titles and the فصلٌ ornament, as the table of contents prints them
+  const contents = fixHeadingsFromContents(pageModels);
   unifyAiFontSize(pageModels);
   // a cover or title page read as text: once its lines are settled they are plain centred paragraphs, not lines in a box (a table,
   // which Shamela takes for a picture); the title on a cover is not a heading of the book
   for (const m of pageModels) m.blocks = m.blocks.flatMap((b) => (b.type === 'table' && b.card ? b.cells[0].paras.map((x) => ({ ...x, align: 'center', noHeading: true })) : [b]));
+  if (options.printMatch) fillEmptyPages(pageModels);
   if (ctx.previewDir) await savePreview(pageModels, ctx.previewDir, { name: ctx.title, rtl: options.language !== 'en', highlight: options.highlightUncertain, source: true });
   const dirs = results.map((r) => r.meta.pageDir).filter(Boolean);
   const pageDir = dirs.filter((d) => d === 'rtl').length >= dirs.length / 2 && dirs.length ? 'rtl' : (options.language === 'en' ? 'ltr' : 'rtl');
@@ -275,6 +313,8 @@ export async function convertPdf(ctx) {
   await writeFile(outPath, buffer);
 
   const report = buildReport({ results, quran, total, startedAt: t0, bytes: buffer.length });
+  report.pageNumbers = pageNumbers;
+  report.contents = contents;
   if (batch) report.aiBatch = batch.result;
   if (options.printMatch) {
     const fitted = stats.fitted || [];
@@ -285,53 +325,39 @@ export async function convertPdf(ctx) {
 
 /**
  * printMatch: Shamela takes no pictures, so none reaches the Word file. Whatever is still a picture (an ornament of a text page,
- * a page nothing could be read from) is left out, and the page is marked for review.
+ * a page kept whole as a picture by a conversion saved before) is left out, and the page is marked for review; a page left with
+ * nothing on it is named by fillEmptyPages.
  */
-/** A page whose AI reading failed for Google's reasons (overloaded, slow, rate limit) and fell back to the standard OCR. */
-export const aiMissed = (meta) => (meta?.warnings || []).some((w) => w.startsWith('ai-failed-used-standard-ocr') || w.startsWith('page-error:AI reading failed'));
-
-/**
- * The pages Google could not read during the conversion (a busy hour gives "high demand" 503s and timeouts in runs) were read
- * by the standard OCR, which garbles a diacritised book. They are read again with the AI at the end, two at a time after a
- * pause, in up to two rounds; a page read this time replaces its OCR reading, one that fails again keeps it.
- */
-export async function rereadMissed({ results, runOnce, front = 0, frontAs = {}, saved, onProgress, isCancelled, waitIfPaused, pauses = [15_000, 45_000] }) {
-  for (const pause of pauses) {
-    const missed = results.filter((r) => r && aiMissed(r.meta)).map((r) => r.meta.n);
-    if (!missed.length) return;
-    let done = 0;
-    onProgress({ phase: 'retrying', done, total: missed.length });
-    await new Promise((r) => setTimeout(r, pause));
-    let next = 0;
-    await Promise.all(Array.from({ length: Math.min(2, missed.length) }, async () => {
-      while (next < missed.length) {
-        if (waitIfPaused) await waitIfPaused();
-        if (isCancelled()) throw new Error('cancelled');
-        const n = missed[next++];
-        const page = await runOnce(n, { ...(n <= front ? frontAs : {}), aiRetry: true }).catch(() => null);
-        if (page && page.model?.method !== 'error' && !aiMissed(page.meta)) {
-          results[n - 1] = page;
-          if (saved) await writeFile(path.join(saved, `${n}.json`), JSON.stringify(page)).catch(() => {});
-        }
-        onProgress({ phase: 'retrying', done: ++done, total: missed.length });
-      }
-    }));
-  }
-}
-
 export function dropPictures(results) {
   for (const { model, meta } of results) {
-    // a page kept as a picture because it could not be read at all: without the picture it would be lost (an empty page)
-    if (model.blocks.length === 1 && model.blocks[0].fullPage) continue;
     const kept = model.blocks.filter((b) => b.type !== 'image');
     if (kept.length === model.blocks.length) continue;
     model.blocks = kept;
     meta.warnings = [...(meta.warnings || []), 'pictures-removed'];
     if (!kept.length) {
+      model.pictureDropped = true;
       model.method = 'blank';
       meta.method = 'blank';
     }
   }
+}
+
+/**
+ * printMatch: no Word page is left empty. A page with no text of its own (a blank page of the book, a picture that was dropped,
+ * a card whose every line was a guess) gets one centred line saying what it is.
+ */
+export function fillEmptyPages(models) {
+  const hasText = (b) => (b.type === 'p' && !b.margin && b.runs?.some((r) => r.text.trim())) || b.type === 'table';
+  let filled = 0;
+  for (const m of models) {
+    if (m.blocks.some(hasText)) continue;
+    const [p] = paragraphsToBlocks([{ text: m.pictureDropped ? PICTURE_PAGE : BLANK_PAGE, heading: false, center: true }], { bodyPt: 16 });
+    m.blocks = [...m.blocks, pageLabel(p)];
+    // flowed inside the margins of an AI-read page (FLOW_MARGINS of process-page.js)
+    if (!m.flow) { m.flow = true; m.margins = { top: 36, bottom: 30, left: 42, right: 42 }; }
+    filled++;
+  }
+  return filled;
 }
 
 /**
@@ -413,6 +439,8 @@ export function buildReport({ results, quran, total, startedAt, bytes }) {
     // input tokens a prompt cache served (billed at the cache price), and pages a fallback reader read (ai-fallback:*)
     aiCachedTokens: results.reduce((s, { meta }) => s + (meta.aiTokens?.cached || 0), 0),
     aiFallbackPages: results.filter(({ meta }) => meta.aiVia && meta.warnings?.some((w) => w.startsWith('ai-fallback:'))).length,
+    // pages read by each AI model (a fallback model, once the first one's quota is used up, shows here)
+    aiModels: results.reduce((m, { meta }) => (meta.aiModel ? { ...m, [meta.aiModel]: (m[meta.aiModel] || 0) + 1 } : m), {}),
   };
   return {
     pages: total,

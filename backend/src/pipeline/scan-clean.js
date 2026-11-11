@@ -150,6 +150,122 @@ export function eraseRules(gray, w, h, { inkBelow = 140, longV = Math.round(h * 
 }
 
 /**
+ * Paints out, in place, a thin rule down the page (the edge of the scanned page, the binding), straightened with the page: a rule
+ * of a pixel or two that the turn broke into a staircase of short pieces, each much taller than it is wide. No stroke of type is
+ * that thin for its height (an alif is a fifth as wide as it is tall), and a rule along the side puts ink on every row, so a line
+ * finder sees the page as one block and the gap before the rule as the middle of a verse.
+ * @returns {number} how many pieces were painted out
+ */
+export function eraseThinRules(gray, w, h, { inkBelow = 200 } = {}) {
+  const ink = new Uint8Array(w * h);
+  for (let i = 0; i < ink.length; i++) ink[i] = gray[i] < inkBelow ? 1 : 0;
+  const { labels, comps } = labelComponents(ink, w, h);
+  const kill = new Set(comps.filter((c) => c.h >= h * 0.03 && c.w <= c.h * 0.06).map((c) => c.id));
+  if (kill.size) for (let i = 0; i < labels.length; i++) if (kill.has(labels[i])) gray[i] = 255;
+  return kill.size;
+}
+
+/**
+ * Paints out, in place, the stamp an uploader set in the top left corner of a scanned book's pages ("رفع عبد الرحمن النجدي أسكنه
+ * الله الفردوس www.moswarat.com", on the chapter openings of the books of that site): a small block of a few short lines, the first
+ * ink of the page, with nothing printed beside it. Read, it was a line of nonsense joined to the chapter's heading.
+ * A book's own text is never set there: an Arabic line that does not fill the measure ends at the right, a heading is
+ * centred, a page number up there is narrower and has the running title beside it, and a block of text set there (an address at
+ * the head of a letter) has no short first word centred over its other lines, as the stamp has.
+ * @returns {object|null} the box painted out, or null when the page has no stamp
+ */
+export function eraseStamp(gray, w, h, { inkBelow = 140 } = {}) {
+  // the edges of the scan (the shadow of the page's edge, a strip of the next page) are no part of it
+  const xa = Math.round(w * 0.03);
+  const xb = Math.round(w * 0.97);
+  // the bands of ink at the top of the page, apart from one another by a white row or more, with how far each reaches
+  const bands = [];
+  let cur = null;
+  for (let y = 0; y < Math.round(h * 0.2); y++) {
+    let x0 = xb;
+    let x1 = -1;
+    let c = 0;
+    for (let x = xa; x < xb; x++) if (gray[y * w + x] < inkBelow) { c++; if (x < x0) x0 = x; x1 = x; }
+    if (c > 2) { // a speck of dust is no line
+      if (!cur) bands.push(cur = { y0: y, y1: y, x0, x1 });
+      cur.y1 = y;
+      cur.x0 = Math.min(cur.x0, x0);
+      cur.x1 = Math.max(cur.x1, x1);
+    } else {
+      cur = null;
+      if (bands.length && y - bands[bands.length - 1].y1 > h * 0.03) break;
+    }
+  }
+  // the stamp's lines, from the top, as far as they keep to the corner. A heading set close under it can run into its last lines
+  // (no white row between them): of such a band, the part at the left of a wide white gap, where the stamp's lines stand, is the
+  // stamp's; a heading's words are never that far apart
+  const lines = [];
+  const pieces = [];
+  for (const b of bands) {
+    if (b.y1 - b.y0 < 3 && b.x1 - b.x0 < w * 0.02) continue; // a speck
+    if (b.x0 < w * 0.04 || (lines.length && b.y0 - (pieces.at(-1) || lines.at(-1)).y1 > h * 0.03)) break;
+    if (b.x1 <= w * 0.43) { (pieces.length ? pieces : lines).push(b); continue; }
+    // a speck of the scan out on the rows of a line of the stamp: the line is what stands at the left of the gap before it
+    const left = !pieces.length && leftOfGap(gray, w, b, Math.round(w * 0.04), inkBelow);
+    if (left && left.x1 <= w * 0.43 && inkIn(gray, w, { ...b, x0: left.x1 + 1 }, inkBelow) < (b.y1 - b.y0 + 1) * 3) {
+      lines.push({ ...b, x1: left.x1 });
+      continue;
+    }
+    if (lines.length < 2) break;
+    const x0 = Math.min(...lines.map((l) => l.x0));
+    const x1 = Math.max(...lines.map((l) => l.x1));
+    const part = leftOfGap(gray, w, b, Math.round(w * 0.04), inkBelow);
+    if (!part || Math.abs(part.x0 - x0) > w * 0.05 || part.x1 > x1 + w * 0.03) break;
+    pieces.push(part);
+  }
+  if (lines.length < 2 || lines[0].y0 > h * 0.1) return null;
+  const top = lines[0].y0;
+  const bottom = lines.at(-1).y1;
+  const x0 = Math.min(...lines.map((b) => b.x0));
+  const x1 = Math.max(...lines.map((b) => b.x1));
+  if (bottom - top < h * 0.03 || bottom - top > h * 0.13 || x1 - x0 < w * 0.12 || x1 - x0 > w * 0.38) return null;
+  // the stamp's own shape: one short word ("رفع") centred over its wider lines
+  const k = lines.findIndex((b) => b.x1 - b.x0 > (x1 - x0) * 0.5);
+  if (k < 1) return null;
+  const hx0 = Math.min(...lines.slice(0, k).map((b) => b.x0));
+  const hx1 = Math.max(...lines.slice(0, k).map((b) => b.x1));
+  if (hx1 - hx0 > (x1 - x0) * 0.35 || Math.abs((hx0 + hx1) / 2 - (x0 + x1) / 2) > (x1 - x0) * 0.15) return null;
+  const pad = Math.round(h * 0.004);
+  const paint = (r) => {
+    const box = { x0: Math.max(0, r.x0 - pad), x1: Math.min(w, r.x1 + pad + 1), y0: Math.max(0, r.y0 - pad), y1: Math.min(h, r.y1 + pad + 1) };
+    for (let y = box.y0; y < box.y1; y++) gray.fill(255, y * w + box.x0, y * w + box.x1);
+    return box;
+  };
+  for (const r of pieces) paint(r);
+  return paint({ x0, x1, y0: top, y1: bottom });
+}
+
+/** The ink of a band of rows at the left of its first white gap at least `minGap` wide: its box, or null when it has no such gap. */
+/** How many inked pixels the box holds. */
+function inkIn(gray, w, b, inkBelow) {
+  let n = 0;
+  for (let y = b.y0; y <= b.y1; y++) for (let x = b.x0; x <= b.x1; x++) if (gray[y * w + x] < inkBelow) n++;
+  return n;
+}
+
+function leftOfGap(gray, w, band, minGap, inkBelow) {
+  const cols = new Uint8Array(w);
+  const rows = [];
+  for (let x = band.x0; x <= band.x1; x++) for (let y = band.y0; y <= band.y1; y++) if (gray[y * w + x] < inkBelow) { cols[x] = 1; break; }
+  let white = 0;
+  for (let x = band.x0; x <= band.x1; x++) {
+    if (cols[x]) { white = 0; continue; }
+    if (++white < minGap) continue;
+    const x1 = x - white;
+    for (let y = band.y0; y <= band.y1; y++) {
+      for (let k = band.x0; k <= x1; k++) if (gray[y * w + k] < inkBelow) { rows.push(y); break; }
+    }
+    return { x0: band.x0, x1, y0: rows[0], y1: rows.at(-1) };
+  }
+  return null;
+}
+
+/**
  * A cover's lettering, dark on white whatever its colours: gold or white letters on a dark ground and dark letters on a light one
  * alike. Each pixel is measured against the ground around it (the median of its block, blended between blocks): what stands out
  * from the ground, lighter or darker, is ink. A whole page turned over (the earlier way) lost the light letters of a cover whose
@@ -190,29 +306,92 @@ export function inkFromGround(gray, w, h, { B = 96 } = {}) {
 }
 
 /**
- * Make a page crop easy to read for a vision model: flatten uneven paper tone / shadows (divide by a block-wise paper
- * estimate), stretch the contrast so ink is black and paper white, and sharpen thin strokes and dots slightly.
- * Returns a JPEG buffer. Nothing is binarised: dots and diacritics keep their grey edges.
+ * Make a page crop easy to read for a vision model: flatten uneven paper tone / shadows (evenPaper), turn a page photographed
+ * or scanned askew straight (deskew), and sharpen thin strokes and dots slightly.
+ * Returns a JPEG buffer. Nothing is binarised and nothing is smoothed away: dots and diacritics keep their grey edges (a median
+ * filter, the usual cure for a phone camera's noise, erases a fatha or a sukun at 200 dpi).
  */
-export async function enhanceForAi(gray, w, h) {
+export async function enhanceForAi(gray, w, h, { straight = false } = {}) {
+  // `straight`: the crop has been through straighten already (the hybrid reading looks at it before deciding who reads it)
+  const g = straight ? gray : (await straighten(gray, w, h)).gray;
+  return sharp(Buffer.from(g.buffer, g.byteOffset, g.length), { raw: { width: w, height: h, channels: 1 } })
+    .sharpen({ sigma: 0.8 })
+    .jpeg({ quality: 92 })
+    .toBuffer();
+}
+
+/** Even paper, then straight lines: the page as the AI readers and the line geometry see it, before sharpening. */
+export async function straighten(gray, w, h) {
+  return deskew(evenPaper(gray, w, h).gray, w, h);
+}
+
+/**
+ * Even paper: divide each pixel by a block-wise estimate of the paper tone (the shadow of a phone or of the book's spine, a page
+ * yellowed at its edges), then stretch the contrast so ink is black and paper white.
+ * The estimate is the tone a tenth of a block's pixels are darker than, never under 90: in a block of dense type that falls in the
+ * ink, so whatever is lighter than it turns white. On a clean scan that only trims the grey fringe off black strokes. A faded
+ * print, though, is grey ink (the strokes 90-150, not black): it lost half its strokes that way and the reader saw broken
+ * letters (a line of نزل بها على جبريل أعادها ثلاثا وقال هى لك read as آذانشا ثُلثنا وَقَالَ هَسِيَ آلَكَ). When the division keeps
+ * under 80% of a page's dark pixels (a clean scan keeps 85-90%, a faded one 55-70%), the page is divided by its paper's own tone
+ * instead (the tone a tenth of a block's pixels are lighter than), which keeps every stroke, and its grey ink is darkened.
+ * Under 40% kept is a cover or a picture (broad dark grounds, not strokes), left as it was.
+ * `spread`: how far apart the paper tones of the page were (0-255; a flat scan stays under 20, a phone photo is 40 and up).
+ * `faint`: the page was read as faded print.
+ * @returns {{gray:Uint8Array, spread:number, faint:boolean}}
+ */
+export function evenPaper(gray, w, h) {
   const B = 24;
   const bw = Math.ceil(w / B);
   const bh = Math.ceil(h / B);
-  const bg = new Float32Array(bw * bh);
+  const trim = new Float32Array(bw * bh);
+  const paper = new Float32Array(bw * bh);
   for (let by = 0; by < bh; by++) {
     for (let bx = 0; bx < bw; bx++) {
-      // paper tone of a block = a high percentile of its pixels (ink is a minority)
       const hist = new Uint32Array(256);
       let n = 0;
       for (let y = by * B; y < Math.min(h, (by + 1) * B); y++) {
         for (let x = bx * B; x < Math.min(w, (bx + 1) * B); x++) { hist[gray[y * w + x]]++; n++; }
       }
       let acc = 0;
-      let v = 255;
-      for (let k = 255; k >= 0; k--) { acc += hist[k]; if (acc >= n * 0.9) { v = k; break; } }
-      bg[by * bw + bx] = Math.max(v, 90);
+      let v = -1;
+      let u = 255;
+      for (let k = 255; k >= 0; k--) {
+        acc += hist[k];
+        if (v < 0 && acc >= n * 0.1) v = k;
+        if (acc >= n * 0.9) { u = k; break; }
+      }
+      trim[by * bw + bx] = Math.max(u, 90);
+      paper[by * bw + bx] = Math.max(v, 90);
     }
   }
+  let out = divideBy(gray, w, h, trim, B);
+  let dark = 0;
+  let kept = 0;
+  for (let i = 0; i < gray.length; i++) if (gray[i] < 128) { dark++; if (out[i] < 128) kept++; }
+  const faint = dark > gray.length * 0.01 && kept >= dark * 0.4 && kept < dark * 0.8;
+  if (faint) out = divideBy(gray, w, h, paper, B);
+  // contrast stretched between the 1st and 99th percentiles, but black is never set lighter than ink: on a title page the ink is
+  // under 1% of the page, the 1st percentile falls in the faint print showing through from the back of the leaf, and stretching
+  // to it turned that print black (measured: ink 0.6-0.8% of a title page, the show-through at 200-240)
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < out.length; i++) hist[out[i]]++;
+  const at = (q) => { let acc = 0; for (let k = 0; k < 256; k++) { acc += hist[k]; if (acc >= out.length * q) return k; } return 255; };
+  const lo = Math.min(at(0.01), 96);
+  const hi = Math.max(at(0.99), lo + 64);
+  // faded print: grey ink darkened, the paper's specks and the grey fringe of the strokes (above 215) set white
+  const lut = new Uint8Array(256);
+  for (let k = 0; k < 256; k++) {
+    const t = Math.max(0, Math.min(1, (k - lo) / (hi - lo)));
+    lut[k] = Math.round(255 * (faint ? Math.min(1, (t * 255) / 215) ** 1.6 : t));
+  }
+  for (let i = 0; i < out.length; i++) out[i] = lut[out[i]];
+  return { gray: out, spread: paperSpread(gray, w, h), faint };
+}
+
+/** Each pixel divided by the block tones (bw x bh blocks of B pixels), bilinear between the blocks' centres. */
+function divideBy(gray, w, h, bg, B) {
+  const bw = Math.ceil(w / B);
+  const bh = Math.ceil(h / B);
   const out = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) {
     const fy = Math.min(bh - 1, Math.max(0, y / B - 0.5));
@@ -228,19 +407,84 @@ export async function enhanceForAi(gray, w, h) {
       out[y * w + x] = Math.min(255, Math.round((gray[y * w + x] * 255) / paper));
     }
   }
-  // contrast stretched between the 1st and 99th percentiles, but black is never set lighter than ink: on a title page the ink is
-  // under 1% of the page, the 1st percentile falls in the faint print showing through from the back of the leaf, and stretching
-  // to it turned that print black (measured: ink 0.6-0.8% of a title page, the show-through at 200-240)
-  const hist = new Uint32Array(256);
-  for (let i = 0; i < out.length; i++) hist[out[i]]++;
-  const at = (q) => { let acc = 0; for (let k = 0; k < 256; k++) { acc += hist[k]; if (acc >= out.length * q) return k; } return 255; };
-  const lo = Math.min(at(0.01), 96);
-  const hi = Math.max(at(0.99), lo + 64);
-  for (let i = 0; i < out.length; i++) out[i] = Math.max(0, Math.min(255, Math.round(((out[i] - lo) * 255) / (hi - lo))));
-  return sharp(Buffer.from(out.buffer, out.byteOffset, out.length), { raw: { width: w, height: h, channels: 1 } })
-    .sharpen({ sigma: 0.8 })
-    .jpeg({ quality: 92 })
+  return out;
+}
+
+/**
+ * How far apart the paper tones of a page are (0-255): the page in 8 x 8 cells, the paper tone of each its 95th percentile (large
+ * enough cells for the text in them not to count), and the spread between the lighter and darker cells (10th to 90th percentile).
+ */
+export function paperSpread(gray, w, h, { cells = 8 } = {}) {
+  const tones = [];
+  for (let cy = 0; cy < cells; cy++) {
+    for (let cx = 0; cx < cells; cx++) {
+      const hist = new Uint32Array(256);
+      let n = 0;
+      for (let y = Math.floor((cy * h) / cells); y < Math.floor(((cy + 1) * h) / cells); y += 2) {
+        for (let x = Math.floor((cx * w) / cells); x < Math.floor(((cx + 1) * w) / cells); x += 2) { hist[gray[y * w + x]]++; n++; }
+      }
+      if (!n) continue;
+      let acc = 0;
+      for (let k = 255; k >= 0; k--) { acc += hist[k]; if (acc >= n * 0.05) { tones.push(k); break; } }
+    }
+  }
+  tones.sort((a, b) => a - b);
+  return tones.length ? tones[Math.floor(tones.length * 0.9)] - tones[Math.floor(tones.length * 0.1)] : 0;
+}
+
+/**
+ * The angle (degrees) the text lines of a page are tilted by: the one at which the ink, summed along rows, falls into the
+ * sharpest bands. Searched within ±maxDeg on a reduced copy; 0 when the page has too little ink or no angle is clearly better
+ * than none. Positive: the lines run down to the right.
+ */
+export function skewAngle(gray, w, h, { maxDeg = 5, step = 0.25, inkBelow = 140 } = {}) {
+  const k = Math.max(1, Math.round(w / 800));
+  const sw = Math.floor(w / k);
+  const sh = Math.floor(h / k);
+  const xs = [];
+  const ys = [];
+  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) if (gray[y * k * w + x * k] < inkBelow) { xs.push(x); ys.push(y); }
+  if (xs.length < 400) return 0;
+  const pad = Math.ceil(sw * Math.tan((maxDeg * Math.PI) / 180)) + 1;
+  const rows = new Float64Array(sh + 2 * pad);
+  const score = (deg) => {
+    const t = Math.tan((deg * Math.PI) / 180);
+    rows.fill(0);
+    for (let i = 0; i < xs.length; i++) rows[Math.round(ys[i] - xs[i] * t) + pad]++;
+    let s = 0;
+    for (const r of rows) s += r * r;
+    return s;
+  };
+  const flat = score(0);
+  let best = 0;
+  let top = flat;
+  for (let d = -maxDeg; d <= maxDeg + 1e-9; d += step) { const s = score(d); if (s > top) { top = s; best = d; } }
+  for (let d = best - step; d <= best + step + 1e-9; d += step / 5) { const s = score(d); if (s > top) { top = s; best = d; } }
+  return top > flat * 1.05 ? Math.round(best * 100) / 100 : 0;
+}
+
+/**
+ * A page tilted by 0.3° or more is turned straight (white comes in at the corners), and kept at its size, so the lines can be
+ * found and cut apart (a 2° tilt across a page is wider than a line's height). A straight page is returned as it is.
+ * @returns {Promise<{gray:Uint8Array, angle:number}>}
+ */
+export async function deskew(gray, w, h) {
+  const angle = skewAngle(gray, w, h);
+  if (Math.abs(angle) < 0.3) return { gray, angle: 0 };
+  const turned = await sharp(Buffer.from(gray.buffer, gray.byteOffset, gray.length), { raw: { width: w, height: h, channels: 1 } })
+    .rotate(-angle, { background: { r: 255, g: 255, b: 255 } }) // turned back by the tilt
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const { width: tw, height: th } = turned.info;
+  const left = Math.max(0, Math.round((tw - w) / 2));
+  const top = Math.max(0, Math.round((th - h) / 2));
+  const out = await sharp(turned.data, { raw: { width: tw, height: th, channels: turned.info.channels } })
+    .extract({ left, top, width: Math.min(w, tw - left), height: Math.min(h, th - top) })
+    .extend({ right: Math.max(0, w - (tw - left)), bottom: Math.max(0, h - (th - top)), background: { r: 255, g: 255, b: 255 } })
+    .greyscale()
+    .raw()
     .toBuffer();
+  return { gray: new Uint8Array(out.buffer, out.byteOffset, w * h), angle };
 }
 
 /**
@@ -327,7 +571,8 @@ const percentile = (arr, p) => {
 
 /**
  * Erase diacritics (tashkeel): small marks that are not round solid dots (letter dots are kept).
- * @returns {{gray:Uint8Array, removed:number, unit:number, bigCount:number}}
+ * `specks`: how many of the removed marks were specks of dust or noise (a phone camera's grain), not diacritics.
+ * @returns {{gray:Uint8Array, removed:number, specks:number, unit:number, bigCount:number}}
  */
 export function stripDiacritics(gray, w, h, opts = {}) {
   const ink = toInk(gray, opts.threshold ?? otsu(gray));
@@ -336,16 +581,17 @@ export function stripDiacritics(gray, w, h, opts = {}) {
   const unit = percentile(big, 0.5) || 40; // typical word height
   const out = Uint8Array.from(gray);
   const kill = new Set();
+  let specks = 0;
   for (const c of comps) {
     if (c.h > unit * 0.5 || c.w > unit * 0.9) continue; // letters / words
-    if (c.area < 3) { kill.add(c.id); continue; } // specks
+    if (c.area < 3) { kill.add(c.id); specks++; continue; } // specks
     const extent = c.area / (c.w * c.h);
     const aspect = Math.max(c.w / c.h, c.h / c.w);
     const isDot = extent >= (opts.dotExtent ?? 0.35) && aspect <= (opts.dotAspect ?? 1.3);
     if (!isDot) kill.add(c.id);
   }
   for (let i = 0; i < labels.length; i++) if (labels[i] && kill.has(labels[i])) out[i] = 255;
-  return { gray: out, removed: kill.size, unit, bigCount: big.length };
+  return { gray: out, removed: kill.size, specks, unit, bigCount: big.length };
 }
 
 /**
@@ -386,6 +632,11 @@ export async function prepareForOcr(gray, w, h, opts = {}) {
   let ch = h;
   let offsetX = 0;
   let offsetY = 0;
+  // a page photographed with a phone (a shadow across it, paper darker at one side): the OCR's single threshold would cut the
+  // dark side's letters into blobs and lose the light side's thin strokes. A flat scan is left exactly as it was.
+  const even = evenPaper(g, w, h);
+  const evened = even.spread >= (opts.unevenAt ?? 40);
+  if (evened) g = even.gray;
   const box = opts.crop === false ? null : findFrameInterior(g, w, h);
   if (box) {
     const c = crop(g, w, h, box);
@@ -420,7 +671,17 @@ export async function prepareForOcr(gray, w, h, opts = {}) {
     width: cw,
     height: ch,
     geometry: { scale, offsetX, offsetY },
-    info: { cropped: !!box, diacriticsStripped: strip, marksPerWord: Number(ratio.toFixed(2)), textUnitPx: unit, scale: Number(scale.toFixed(2)) },
+    info: {
+      cropped: !!box,
+      diacriticsStripped: strip,
+      marksPerWord: Number(ratio.toFixed(2)),
+      // the same without the specks: the diacritics the page really prints
+      vowelsPerWord: Number((stripped.bigCount ? (stripped.removed - stripped.specks) / stripped.bigCount : 0).toFixed(2)),
+      wordsSeen: stripped.bigCount,
+      paperEvened: evened || undefined,
+      textUnitPx: unit,
+      scale: Number(scale.toFixed(2)),
+    },
   };
 }
 

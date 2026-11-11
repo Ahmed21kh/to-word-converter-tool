@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { throttleBuffer, claimSlot, releaseWorker } from './gemini-throttle.js';
 
 const workerFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'workers', 'pdf-worker.js');
 
@@ -17,7 +18,9 @@ export class WorkerPool {
   }
 
   #spawn(index) {
-    const slot = { index, worker: new Worker(workerFile), busy: null };
+    // every worker shares one limit on the Gemini requests (gemini-throttle.js)
+    const turns = claimSlot();
+    const slot = { index, turns, worker: new Worker(workerFile, { workerData: { geminiThrottle: throttleBuffer(), slot: turns } }), busy: null };
     slot.worker.on('message', (m) => this.#onMessage(slot, m));
     slot.worker.on('error', (err) => this.#onCrash(slot, err));
     slot.worker.on('exit', (code) => {
@@ -45,7 +48,8 @@ export class WorkerPool {
       task.reject(err);
     }
     slot.worker.removeAllListeners();
-    slot.worker.terminate().catch(() => {});
+    // the Gemini turns it held are given back once it has stopped
+    slot.worker.terminate().catch(() => {}).finally(() => releaseWorker(slot.turns));
     this.slots[slot.index] = this.#spawn(slot.index);
     this.#pump();
   }
@@ -98,6 +102,6 @@ export class WorkerPool {
   }
 
   async close() {
-    await Promise.all(this.slots.map((s) => s.worker.terminate()));
+    await Promise.all(this.slots.map((s) => s.worker.terminate().finally(() => releaseWorker(s.turns))));
   }
 }

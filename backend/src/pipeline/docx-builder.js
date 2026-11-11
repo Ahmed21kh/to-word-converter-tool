@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, ImageRun, WidthType, AlignmentType,
   HeadingLevel, SectionType, LineRuleType, TableLayoutType, PageOrientation, VerticalAlign,
-  CommentRangeStart, CommentRangeEnd, CommentReference, BorderStyle, Tab, TabStopType,
+  CommentRangeStart, CommentRangeEnd, CommentReference, BorderStyle, Tab, TabStopType, Footer,
 } from 'docx';
 import { ARABIC_ANY, ARABIC_LETTER, UNMAPPED } from './arabic.js';
 import { fitPage, bookGrowth } from './page-fit.js';
@@ -94,6 +94,7 @@ function runsToTextRuns(runs, par, o) {
         boldComplexScript: !!(r.bold || r.verse),
         italics: !!r.italic,
         italicsComplexScript: !!r.italic,
+        superScript: r.sup || undefined, // a note's mark in the text, raised as printed
         rightToLeft: isAr,
         language: isAr ? { value: 'en-US', bidirectional: 'ar-SA' } : { value: 'en-US' },
         highlight: bad || (o.highlightUncertain && r.lowConf) ? 'yellow' : undefined,
@@ -133,7 +134,9 @@ function buildParagraph(par, ctx) {
     alignment: ALIGN[par.align],
     heading: par.runningHead ? undefined : headingFor(par, bodyFs, o),
     indent: par.firstLine ? { firstLine: tw(par.firstLine) } : undefined,
-    tabStops: par.runningHead && contentW ? [{ type: TabStopType.END, position: tw(contentW) - 10 }] : undefined,
+    tabStops: par.runningHead && contentW ? [{ type: TabStopType.END, position: tw(contentW) - 10 }]
+      // a verse: each half centred in its half of the line (the first tab from the right margin, the text being right to left)
+      : par.poem && contentW ? [{ type: TabStopType.CENTER, position: tw(contentW * 0.25) }, { type: TabStopType.CENTER, position: tw(contentW * 0.75) }] : undefined,
     border,
     spacing: {
       before: noSpacing ? 0 : tw(Math.min(spaceBefore, 220) * spacingScale),
@@ -215,6 +218,50 @@ function buildTable(block, ctx) {
   });
 }
 
+const NO_BORDER = { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' };
+
+/**
+ * Consecutive verses of poetry (poem paragraphs: two halves, each opening on a tab) as one borderless table of two equal columns,
+ * the first half (sadr) on the right: each half is centred in its column and wraps inside it when it is longer than half the line,
+ * so the halves of a poem stay lined up however Word breaks them.
+ */
+function buildVerses(verses, ctx) {
+  const col = tw(ctx.contentW / 2);
+  const rtl = verses[0].dir === 'rtl';
+  const rows = verses.map((par) => {
+    const k = par.runs.findIndex((r, i) => i > 0 && r.tab);
+    const halves = k > 0 ? [par.runs.slice(0, k), par.runs.slice(k)] : [par.runs, []];
+    return new TableRow({
+      cantSplit: true,
+      children: halves.map((runs) => new TableCell({
+        width: { size: col, type: WidthType.DXA },
+        borders: { top: NO_BORDER, bottom: NO_BORDER, left: NO_BORDER, right: NO_BORDER },
+        margins: { top: 0, bottom: 0, left: 80, right: 80 },
+        children: [buildParagraph({
+          ...par,
+          poem: false,
+          noHeading: true,
+          align: 'center',
+          firstLine: 0,
+          runs: runs.map((r, i) => ({ ...r, tab: false, text: i === runs.length - 1 ? r.text.trimEnd() : r.text })),
+        }, { ...ctx, noSpacing: true })],
+      })),
+    });
+  });
+  return new Table({
+    rows,
+    columnWidths: [col, col],
+    width: { size: col * 2, type: WidthType.DXA },
+    layout: TableLayoutType.FIXED,
+    visuallyRightToLeft: rtl,
+    alignment: AlignmentType.CENTER,
+    borders: { top: NO_BORDER, bottom: NO_BORDER, left: NO_BORDER, right: NO_BORDER, insideHorizontal: NO_BORDER, insideVertical: NO_BORDER },
+  });
+}
+
+// Word joins two tables that touch: a hairline paragraph keeps them apart
+const tableGap = () => new Paragraph({ spacing: { before: 0, after: 0, line: 20, lineRule: LineRuleType.EXACT }, children: [] });
+
 function documentBodySize(pages) {
   const w = new Map();
   for (const p of pages) {
@@ -257,7 +304,29 @@ function layoutOf(page) {
   return layout;
 }
 
-async function buildSection(page, bodyFs, o) {
+/** The page number at the foot of a page, centred, in the book's digits (settlePageNumbers), and the room the page leaves it. */
+function pageFooter(page, bodyFs, o) {
+  if (!page.footer?.text) return null;
+  const fs = Math.max(10, Math.min(16, (bodyFs || 14) * 0.9));
+  const distance = Math.max(10, Math.min(28, page.margins.bottom * 0.4));
+  const footer = new Footer({
+    children: [new Paragraph({
+      alignment: AlignmentType.CENTER,
+      bidirectional: true,
+      spacing: { before: 0, after: 0 },
+      children: [new TextRun({
+        text: page.footer.text, font: fontSet(o.arabicFont), size: hp(fs), sizeComplexScript: hp(fs), rightToLeft: true,
+        language: { value: 'en-US', bidirectional: 'ar-SA' },
+      })],
+    })],
+  });
+  return { footer, distance, bottom: Math.max(page.margins.bottom, distance + fs * 1.8) };
+}
+
+async function buildSection(source, bodyFs, o) {
+  const foot = pageFooter(source, bodyFs, o);
+  // the body ends above the page number
+  const page = foot ? { ...source, margins: { ...source.margins, bottom: foot.bottom } } : source;
   const { width, height, margins } = page;
   const contentW = width - margins.left - margins.right;
   const children = [];
@@ -271,13 +340,19 @@ async function buildSection(page, bodyFs, o) {
   const po = fit.scale !== 1 ? { ...o, fsScale: fit.scale } : o;
   const ctxBase = { o: po, bodyFs, contentW, spacingScale: fit.spacing };
 
-  for (const it of layout) {
-    const b = it.block;
-    if (b.type === 'p') {
-      children.push(buildParagraph(b, { ...ctxBase, spaceBefore: it.before }));
+  // a verse in a table of its own (buildVerses); printMatch keeps the two tab stops, as Shamela takes a table for a picture, and so
+  // does the first footnote when it is a verse (the rule above the notes is the paragraph's)
+  const asVerse = (b) => b?.type === 'p' && b.poem && !b.ruleAbove && !o.printMatch && b.runs.some((r, i) => i > 0 && r.tab);
+  for (let i = 0; i < layout.length; i++) {
+    const b = layout[i].block;
+    if (asVerse(b)) {
+      const verses = [b];
+      while (asVerse(layout[i + 1]?.block) && !!layout[i + 1].block.footnote === !!b.footnote) verses.push(layout[++i].block);
+      children.push(buildVerses(verses, ctxBase), tableGap());
+    } else if (b.type === 'p') {
+      children.push(buildParagraph(b, { ...ctxBase, spaceBefore: layout[i].before }));
     } else if (b.type === 'table') {
-      children.push(buildTable(b, ctxBase));
-      children.push(new Paragraph({ spacing: { before: 0, after: 0, line: 20, lineRule: LineRuleType.EXACT }, children: [] }));
+      children.push(buildTable(b, ctxBase), tableGap());
     } else if (b.type === 'image') {
       children.push(await buildImage(b, contentW, o, region));
     }
@@ -293,10 +368,13 @@ async function buildSection(page, bodyFs, o) {
           ? { width: tw(height), height: tw(width), orientation: PageOrientation.LANDSCAPE }
           : { width: tw(width), height: tw(height) },
         margin: {
-          top: tw(margins.top), bottom: tw(margins.bottom), left: tw(margins.left), right: tw(margins.right), header: 0, footer: 0,
+          top: tw(margins.top), bottom: tw(margins.bottom), left: tw(margins.left), right: tw(margins.right), header: 0,
+          footer: foot ? tw(foot.distance) : 0,
         },
       },
     },
+    // a page without a number has an empty foot: a section without one would show the number of the page before it
+    ...(foot ? { footers: { default: foot.footer } } : o.footers ? { footers: { default: new Footer({ children: [new Paragraph({ children: [] })] }) } } : {}),
     children,
   };
 }
@@ -307,7 +385,7 @@ async function buildSection(page, bodyFs, o) {
  * @returns {Promise<Buffer>}
  */
 export async function buildDocx(pages, opts) {
-  const o = { ...opts, comments: [], fitted: [] };
+  const o = { ...opts, comments: [], fitted: [], footers: pages.some((p) => p.footer?.text) };
   const bodyFs = documentBodySize(pages);
   // printMatch: as much larger as the book's full pages have room for, the same on every page (and at most a little)
   if (o.printMatch) o.grow = await bookGrowth(pages.map((p) => ({ page: p, layout: layoutOf(p) })), o);
